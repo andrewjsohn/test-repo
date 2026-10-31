@@ -14,7 +14,7 @@ ActionQueue RB3 and Auto Explore play nicely together.
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.0"
+version = "0.1.1"
 api_version = 10
 dst_compatible = true
 client_only_mod = true

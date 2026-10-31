@@ -7,6 +7,11 @@
 
 local G = GLOBAL
 
+-- A mod's environment only carries a few Lua basics (tonumber is not one of
+-- them), so take every builtin used below from the real global table.
+local tonumber, tostring, type, ipairs, print, math =
+    G.tonumber, G.tostring, G.type, G.ipairs, G.print, G.math
+
 local CFG = {
     fix_gear_fight = GetModConfigData("fix_gear_fight") ~= false,
     manual_equip_grace = tonumber(GetModConfigData("manual_equip_grace")) or 2,
@@ -360,8 +365,10 @@ local function PatchAutoExplore()
     Log("patched SendRPCToServer for Auto Explore")
 end
 
+local explore_key_bound = false
 local function BindExploreKey()
-    if not CFG.fix_explore then return end
+    if explore_key_bound or not CFG.fix_explore then return end
+    explore_key_bound = true
     local key = G.rawget(G, CFG.explore_key) or G.KEY_F1
     G.TheInput:AddKeyDownHandler(key, function()
         -- Auto Explore toggles on the same key press. If it sent a step in the
@@ -389,13 +396,12 @@ end
 InstallAll() -- most mods set their globals at load time
 
 AddComponentPostInit("playercontroller", function(self, inst)
-    if inst ~= Player() then return end
-
-    -- Manual hands equips from the inventory.
+    -- Manual hands equips from the inventory. ThePlayer may not be set yet
+    -- when the component is added, so check whose controller it is per call.
     local old_use = self.RemoteUseItemFromInvTile
     if type(old_use) == "function" then
         self.RemoteUseItemFromInvTile = function(pc, buffaction, item, ...)
-            if CFG.fix_gear_fight and buffaction ~= nil and buffaction.action == G.ACTIONS.EQUIP
+            if CFG.fix_gear_fight and pc.inst == Player() and buffaction ~= nil and buffaction.action == G.ACTIONS.EQUIP
                 and item ~= nil and item.replica ~= nil and item.replica.equippable ~= nil
                 and item.replica.equippable:EquipSlot() == G.EQUIPSLOTS.HANDS then
                 SafeCall("manual equip", OnManualHandsEquip)
