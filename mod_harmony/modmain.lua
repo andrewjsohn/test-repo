@@ -243,9 +243,12 @@ end
 -- never reaches the server, and nothing stops it in a fight. We intercept
 -- only the clicks that come from Auto Explore's own file.
 ------------------------------------------------------------------------------
-local last_explore_send = -math.huge
 local explore_paused = false
-local EXPLORE_ACTIVE_WINDOW = 2.5 -- its loop sends at least every ~1.7 s
+local EXPLORE_ACTIVE_WINDOW = 2.5 -- its loop tries a step at least every ~1.7 s
+-- Times of Auto Explore's latest step attempt, and the one before it in an
+-- earlier frame. Steps we pause still count: they show it is switched on.
+local last_attempt_time = -math.huge
+local prev_attempt_time = -math.huge
 
 local function CalledFromAutoExplore()
     local dbg = G.rawget(G, "debug")
@@ -264,18 +267,27 @@ end
 local function OtherModMoving(player)
     local dodging = G.rawget(G, "AutoDodger_IsDodging")
     if dodging ~= nil and SafeCall("dodging", dodging) then return true end
-    if G.TUNING ~= nil and G.rawget(G.TUNING, "Cheatthread") ~= nil then return true end
+    -- Hit-and-run's thread runs the whole time it is switched on, so only
+    -- count it while it actually has a target.
+    local har = G.rawget(G, "HitAndRun")
+    local har_ent = type(har) == "table" and G.rawget(har, "ent") or nil
+    if har_ent ~= nil and har_ent.IsValid ~= nil and har_ent:IsValid() then return true end
     if QueueBusy(player) then return true end
     return false
 end
 
 local function EnemyEngaged(player)
-    local combat = player.replica ~= nil and player.replica.combat or nil
-    local target = combat ~= nil and combat:GetTarget() or nil
-    if target ~= nil and target:IsValid() then return true end
     local r = CFG.explore_fight_radius
     if r <= 0 then return false end
     local x, y, z = player.Transform:GetWorldPosition()
+    -- Your own combat target can linger after a fight, so it only counts
+    -- while it is alive and close.
+    local combat = player.replica ~= nil and player.replica.combat or nil
+    local target = combat ~= nil and combat:GetTarget() or nil
+    if target ~= nil and target:IsValid() and not target:HasTag("isdead")
+        and target:GetDistanceSqToPoint(x, y, z) <= r * r then
+        return true
+    end
     local ents = G.TheSim:FindEntities(x, y, z, r, { "_combat" }, { "INLIMBO", "player", "playerghost" })
     for _, ent in ipairs(ents) do
         local c = ent.replica ~= nil and ent.replica.combat or nil
@@ -341,6 +353,11 @@ local function PatchAutoExplore()
             and CalledFromAutoExplore() then
             local player = Player()
             if player ~= nil then
+                local now = G.GetTime()
+                if now ~= last_attempt_time then
+                    prev_attempt_time = last_attempt_time
+                    last_attempt_time = now
+                end
                 local pause, stop_first = ExploreShouldPause(player)
                 if pause then
                     if not explore_paused then
@@ -354,7 +371,6 @@ local function PatchAutoExplore()
                     explore_paused = false
                     Log("Auto Explore resumed")
                 end
-                last_explore_send = G.GetTime()
                 if type(x) == "number" and type(z) == "number" then
                     PreviewWalk(x, z, platform)
                 end
@@ -371,16 +387,26 @@ local function BindExploreKey()
     explore_key_bound = true
     local key = G.rawget(G, CFG.explore_key) or G.KEY_F1
     G.TheInput:AddKeyDownHandler(key, function()
-        -- Auto Explore toggles on the same key press. If it sent a step in the
-        -- last couple of seconds it was running, so this press turns it off.
-        if G.GetTime() - last_explore_send <= EXPLORE_ACTIVE_WINDOW then
-            last_explore_send = -math.huge
-            explore_paused = false
-            local player = Player()
-            if player ~= nil then
-                player:DoTaskInTime(0, StopWalkingNow)
+        -- Auto Explore toggles on this same key press, and the game runs the
+        -- two key handlers in no fixed order. So look at its step attempts from
+        -- before this frame to tell whether it was running, and decide on the
+        -- next frame, once its handler has run too.
+        local player = Player()
+        if player == nil then return end
+        local press_time = G.GetTime()
+        local before = last_attempt_time < press_time and last_attempt_time or prev_attempt_time
+        local was_running = press_time - before <= EXPLORE_ACTIVE_WINDOW
+        player:DoTaskInTime(0, function()
+            if last_attempt_time >= press_time then
+                Log("Auto Explore started")
+                return -- it just took its first step; leave that walk alone
             end
-        end
+            explore_paused = false
+            if was_running then
+                last_attempt_time, prev_attempt_time = -math.huge, -math.huge
+                StopWalkingNow()
+            end
+        end)
     end)
 end
 

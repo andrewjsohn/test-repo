@@ -20,7 +20,7 @@ It doesn't change any of those mods' files. It wraps a few of their functions wh
 | Frozen swing when ActionQueue chops or mines | Better Lag Compensation only keeps predicting swings while a key is held, and ActionQueue never holds one. | Better Lag Compensation's swing prediction is switched off while ActionQueue is working, then back on. |
 | Auto Explore keeps walking after F1 | Its stop never reaches the server, so you finish walking to its last target. | Pressing the key while it is running sends the server a stop right away. |
 | Gliding with a frozen pose while exploring | Auto Explore's clicks go straight to the server and skip your game's movement prediction. | Each explore step is also shown on your screen, like a normal click, so you walk normally. |
-| Auto Explore pulls you around in fights | Nothing pauses it. | It pauses while auto_dodger is dodging, hit-and-run is running, ActionQueue is working, or a creature nearby is targeting you. It resumes on its own afterwards. |
+| Auto Explore pulls you around in fights | Nothing pauses it. | It pauses while auto_dodger is dodging, hit-and-run has a target, ActionQueue is working, or a creature nearby is targeting you. It resumes on its own afterwards. |
 
 ## Install
 
