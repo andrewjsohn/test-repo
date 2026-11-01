@@ -21,6 +21,7 @@ local CFG = {
     fix_queue_freeze = GetModConfigData("fix_queue_freeze") ~= false,
     fix_explore = GetModConfigData("fix_explore") ~= false,
     keep_light = GetModConfigData("keep_light") ~= false,
+    walk_only_faster = GetModConfigData("walk_only_faster") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -393,6 +394,46 @@ local function WouldLoseLight(item)
     return IsDarkHere(player)
 end
 
+------------------------------------------------------------------------------
+-- 6. Walking swaps only when they make you faster
+--
+-- With nothing faster than what you hold (no cane), Equipment Master's walk
+-- pick is any hands item, so walking trades your weapon for, say, a marbell.
+-- Auto Combat in Event or Auto gear mode asks for walking gear between swings
+-- (holding at Dragonfly's edge, stepping out of a swipe), so every opening
+-- starts with the weapon in your pack and Auto Combat waits for it to come
+-- back before it swings. A walking swap of the hands item is skipped unless
+-- the new item is actually faster. Lights are left to the rule above.
+------------------------------------------------------------------------------
+local function WalkMult(item)
+    local ii = item ~= nil and item.replica ~= nil and item.replica.inventoryitem or nil
+    if ii == nil or type(ii.GetWalkSpeedMult) ~= "function" then return 1 end
+    local m = ii:GetWalkSpeedMult()
+    return type(m) == "number" and m or 1
+end
+
+local function IsSlowerWalkSwap(item)
+    local player = Player()
+    if player == nil or item == nil or type(item) ~= "table" or item.replica == nil then return false end
+    local equippable = item.replica.equippable
+    local inventory = player.replica ~= nil and player.replica.inventory or nil
+    if equippable == nil or inventory == nil or equippable:EquipSlot() ~= G.EQUIPSLOTS.HANDS then return false end
+    local current = inventory:GetEquippedItem(G.EQUIPSLOTS.HANDS)
+    if current == item then return false end
+    if IsLightItem(item) and not IsLightItem(current) then return false end -- a light coming in
+    return WalkMult(item) <= WalkMult(current) + 0.001
+end
+
+local skip_log_time = {}
+local function LogSkip(item)
+    local key = tostring(item and item.prefab)
+    local now = G.GetTime()
+    if skip_log_time[key] == nil or now - skip_log_time[key] > 10 then
+        skip_log_time[key] = now
+        Log("walk swap skipped, not faster:", key)
+    end
+end
+
 local function WithWalkSwap(fn, ...)
     walk_swap_depth = walk_swap_depth + 1
     local ok, a, b, c = G.pcall(fn, ...)
@@ -402,7 +443,7 @@ local function WithWalkSwap(fn, ...)
 end
 
 local function GuardWalkSwaps(pc)
-    if not CFG.keep_light or pc._mod_harmony_light then return end
+    if not (CFG.keep_light or CFG.walk_only_faster) or pc._mod_harmony_light then return end
     pc._mod_harmony_light = true
     for _, name in ipairs({ "RemoteDirectWalking", "RemotePredictWalking" }) do
         local old = pc[name]
@@ -415,7 +456,7 @@ end
 -- Auto Combat (event mode) and hit-and-run ask Equipment Master for walking
 -- gear through an EquipItem event of type "walk".
 local function GuardWalkEvents(player)
-    if not CFG.keep_light or player._mod_harmony_light then return end
+    if not (CFG.keep_light or CFG.walk_only_faster) or player._mod_harmony_light then return end
     player._mod_harmony_light = true
     local push = player.PushEvent
     player.PushEvent = function(inst, event, data, ...)
@@ -429,7 +470,7 @@ end
 
 local send_patched = false
 local function PatchSendRPC()
-    if send_patched or not (CFG.fix_explore or CFG.keep_light) then return end
+    if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster) then return end
     orig_send = G.rawget(G, "SendRPCToServer")
     if type(orig_send) ~= "function" then return end
     send_patched = true
@@ -438,10 +479,19 @@ local function PatchSendRPC()
                                             noforce, mod_name, platform, ...)
         if walk_swap_depth > 0 and code == G.RPC.ControllerUseItemOnSelfFromInvTile
             and action == G.ACTIONS.EQUIP.code then
-            local ok, lose = G.pcall(WouldLoseLight, x)
-            if ok and lose then
-                Log("kept light: skipped walking swap to", tostring(x and x.prefab))
-                return
+            if CFG.keep_light then
+                local ok, lose = G.pcall(WouldLoseLight, x)
+                if ok and lose then
+                    Log("kept light: skipped walking swap to", tostring(x and x.prefab))
+                    return
+                end
+            end
+            if CFG.walk_only_faster then
+                local ok, slower = G.pcall(IsSlowerWalkSwap, x)
+                if ok and slower then
+                    LogSkip(x)
+                    return
+                end
             end
         end
         if CFG.fix_explore and code == G.RPC.LeftClick and action == G.ACTIONS.WALKTO.code and target == nil

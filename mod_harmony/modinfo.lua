@@ -11,11 +11,13 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Auto Explore stops the moment you press its key, walks with a normal
   walking animation, and pauses during fights and ActionQueue work.
 - Walking in caves or at night never swaps away your only light.
+- Walking only swaps your weapon out for something that is actually
+  faster, so Auto Combat has it in hand when it swings.
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.3"
+version = "0.1.4"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -83,6 +85,8 @@ configuration_options = {
         "Instant stop, normal walking animation, and pause during fights", true),
     onoff("keep_light", "Keep your light in the dark",
         "In caves and at night, walking never swaps your only light (lantern, torch, miner hat) for another item", true),
+    onoff("walk_only_faster", "Walk swaps only when faster",
+        "Walking swaps your hands item only for one that makes you faster (a cane), so your weapon stays in hand", true),
     {
         name = "explore_key",
         label = "Auto Explore key",
