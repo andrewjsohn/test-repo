@@ -9,8 +9,8 @@ local G = GLOBAL
 
 -- A mod's environment only carries a few Lua basics (tonumber is not one of
 -- them), so take every builtin used below from the real global table.
-local tonumber, tostring, type, ipairs, print, math =
-    G.tonumber, G.tostring, G.type, G.ipairs, G.print, G.math
+local tonumber, tostring, type, ipairs, pairs, print, math =
+    G.tonumber, G.tostring, G.type, G.ipairs, G.pairs, G.print, G.math
 
 local CFG = {
     fix_gear_fight = GetModConfigData("fix_gear_fight") ~= false,
@@ -20,6 +20,7 @@ local CFG = {
     dodge_extra_margin = tonumber(GetModConfigData("dodge_extra_margin")) or 0.5,
     fix_queue_freeze = GetModConfigData("fix_queue_freeze") ~= false,
     fix_explore = GetModConfigData("fix_explore") ~= false,
+    keep_light = GetModConfigData("keep_light") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -340,16 +341,110 @@ local function PreviewWalk(x, z, platform)
     end)
 end
 
-local explore_patched = false
-local function PatchAutoExplore()
-    if explore_patched or not CFG.fix_explore then return end
+------------------------------------------------------------------------------
+-- 5. Keep your light in the dark
+--
+-- Equipment Master swaps in its "walk" item (any hands item, when nothing is
+-- actually faster) every time you start walking, and only re-equips a light
+-- after you have already been in the dark. In caves or at night that drops
+-- your lantern for something like a marbell. A walking swap that would take
+-- off your only light while it is dark is skipped.
+------------------------------------------------------------------------------
+local walk_swap_depth = 0
+local LIGHT_TAGS = nil
+
+local function IsLightItem(item)
+    if item == nil or not item:IsValid() then return false end
+    if LIGHT_TAGS == nil then
+        LIGHT_TAGS = { "light", "lighter", "fire" }
+        local fuel = G.rawget(G, "FUELTYPE")
+        if type(fuel) == "table" then
+            if fuel.CAVE ~= nil then LIGHT_TAGS[#LIGHT_TAGS + 1] = fuel.CAVE .. "_fueled" end
+            if fuel.WORMLIGHT ~= nil then LIGHT_TAGS[#LIGHT_TAGS + 1] = fuel.WORMLIGHT .. "_fueled" end
+        end
+    end
+    return item:HasOneOfTags(LIGHT_TAGS)
+end
+
+local function IsDarkHere(player)
+    local world = G.TheWorld
+    if world == nil then return false end
+    if world:HasTag("cave") then return true end
+    local state = world.state
+    return state ~= nil and state.isnight and not state.isfullmoon
+end
+
+local function WouldLoseLight(item)
+    local player = Player()
+    if player == nil or item == nil or type(item) ~= "table" or item.replica == nil then return false end
+    local equippable = item.replica.equippable
+    local inventory = player.replica ~= nil and player.replica.inventory or nil
+    if equippable == nil or inventory == nil then return false end
+    local slot = equippable:EquipSlot()
+    local current = inventory:GetEquippedItem(slot)
+    if current == nil or current == item or not IsLightItem(current) or IsLightItem(item) then
+        return false
+    end
+    for _, other_slot in pairs(G.EQUIPSLOTS) do
+        if other_slot ~= slot and IsLightItem(inventory:GetEquippedItem(other_slot)) then
+            return false -- another light (a miner hat, say) still covers you
+        end
+    end
+    return IsDarkHere(player)
+end
+
+local function WithWalkSwap(fn, ...)
+    walk_swap_depth = walk_swap_depth + 1
+    local ok, a, b, c = G.pcall(fn, ...)
+    walk_swap_depth = walk_swap_depth - 1
+    if not ok then G.error(a, 0) end
+    return a, b, c
+end
+
+local function GuardWalkSwaps(pc)
+    if not CFG.keep_light or pc._mod_harmony_light then return end
+    pc._mod_harmony_light = true
+    for _, name in ipairs({ "RemoteDirectWalking", "RemotePredictWalking" }) do
+        local old = pc[name]
+        if type(old) == "function" then
+            pc[name] = function(...) return WithWalkSwap(old, ...) end
+        end
+    end
+end
+
+-- Auto Combat (event mode) and hit-and-run ask Equipment Master for walking
+-- gear through an EquipItem event of type "walk".
+local function GuardWalkEvents(player)
+    if not CFG.keep_light or player._mod_harmony_light then return end
+    player._mod_harmony_light = true
+    local push = player.PushEvent
+    player.PushEvent = function(inst, event, data, ...)
+        if event == "EquipItem" and type(data) == "table" and type(data.type) == "string"
+            and data.type:find("walk", 1, true) then
+            return WithWalkSwap(push, inst, event, data, ...)
+        end
+        return push(inst, event, data, ...)
+    end
+end
+
+local send_patched = false
+local function PatchSendRPC()
+    if send_patched or not (CFG.fix_explore or CFG.keep_light) then return end
     orig_send = G.rawget(G, "SendRPCToServer")
     if type(orig_send) ~= "function" then return end
-    explore_patched = true
+    send_patched = true
 
     G.rawset(G, "SendRPCToServer", function(code, action, x, z, target, isreleased, controlmods,
                                             noforce, mod_name, platform, ...)
-        if code == G.RPC.LeftClick and action == G.ACTIONS.WALKTO.code and target == nil
+        if walk_swap_depth > 0 and code == G.RPC.ControllerUseItemOnSelfFromInvTile
+            and action == G.ACTIONS.EQUIP.code then
+            local ok, lose = G.pcall(WouldLoseLight, x)
+            if ok and lose then
+                Log("kept light: skipped walking swap to", tostring(x and x.prefab))
+                return
+            end
+        end
+        if CFG.fix_explore and code == G.RPC.LeftClick and action == G.ACTIONS.WALKTO.code and target == nil
             and CalledFromAutoExplore() then
             local player = Player()
             if player ~= nil then
@@ -378,7 +473,7 @@ local function PatchAutoExplore()
         end
         return orig_send(code, action, x, z, target, isreleased, controlmods, noforce, mod_name, platform, ...)
     end)
-    Log("patched SendRPCToServer for Auto Explore")
+    Log("patched SendRPCToServer")
 end
 
 local explore_key_bound = false
@@ -416,12 +511,16 @@ end
 local function InstallAll()
     PatchAutoCombatEquip()
     PatchAutoDodger()
-    PatchAutoExplore()
+    PatchSendRPC()
 end
 
 InstallAll() -- most mods set their globals at load time
 
 AddComponentPostInit("playercontroller", function(self, inst)
+    -- Equipment Master wraps these walking calls first (it loads before us),
+    -- so this wrapper sees its gear swaps happen inside them.
+    GuardWalkSwaps(self)
+
     -- Manual hands equips from the inventory. ThePlayer may not be set yet
     -- when the component is added, so check whose controller it is per call.
     local old_use = self.RemoteUseItemFromInvTile
@@ -442,9 +541,10 @@ AddPlayerPostInit(function(player)
         if player ~= Player() then return end
         InstallAll() -- catch anything that registered late
         BindExploreKey()
+        GuardWalkEvents(player)
         player:DoPeriodicTask(G.FRAMES, function()
             SafeCall("queue freeze", UpdateQueueFreeze, player)
         end)
-        Log("ready: gear", gear_patched, "dodge", dodge_patched, "explore", explore_patched)
+        Log("ready: gear", gear_patched, "dodge", dodge_patched, "rpc", send_patched)
     end)
 end)

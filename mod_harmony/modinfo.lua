@@ -10,11 +10,12 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - ActionQueue chopping and mining no longer freezes the swing animation.
 - Auto Explore stops the moment you press its key, walks with a normal
   walking animation, and pauses during fights and ActionQueue work.
+- Walking in caves or at night never swaps away your only light.
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.2"
+version = "0.1.3"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -80,6 +81,8 @@ configuration_options = {
         "Turns off Better Lag Compensation's swing prediction while ActionQueue is working", true),
     onoff("fix_explore", "Fix Auto Explore",
         "Instant stop, normal walking animation, and pause during fights", true),
+    onoff("keep_light", "Keep your light in the dark",
+        "In caves and at night, walking never swaps your only light (lantern, torch, miner hat) for another item", true),
     {
         name = "explore_key",
         label = "Auto Explore key",

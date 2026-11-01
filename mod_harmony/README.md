@@ -21,6 +21,7 @@ It doesn't change any of those mods' files. It wraps a few of their functions wh
 | Auto Explore keeps walking after F1 | Its stop never reaches the server, so you finish walking to its last target. | Pressing the key while it is running sends the server a stop right away. |
 | Gliding with a frozen pose while exploring | Auto Explore's clicks go straight to the server and skip your game's movement prediction. | Each explore step is also shown on your screen, like a normal click, so you walk normally. |
 | Auto Explore pulls you around in fights | Nothing pauses it. | It pauses while auto_dodger is dodging, hit-and-run has a target, ActionQueue is working, or a creature nearby is targeting you. It resumes on its own afterwards. |
+| Walking swaps your lantern for another item in caves or at night | Equipment Master swaps in its walking item every time you start walking, and only puts a light back after you are already in the dark. | In caves and on dark nights, a walking swap that would take off your only light is skipped. A miner hat or other light still lets it swap. |
 
 ## Install
 
