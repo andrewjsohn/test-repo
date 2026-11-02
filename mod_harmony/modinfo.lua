@@ -13,11 +13,14 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Walking in caves or at night never swaps away your only light.
 - Walking only swaps your weapon out for something that is actually
   faster, so Auto Combat has it in hand when it swings.
+- Auto Combat and Equipment Master fight with your axe, not your pickaxe.
+- The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
+- Auto Dodge is on exactly while Auto Combat is on.
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.4"
+version = "0.1.5"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -87,6 +90,12 @@ configuration_options = {
         "In caves and at night, walking never swaps your only light (lantern, torch, miner hat) for another item", true),
     onoff("walk_only_faster", "Walk swaps only when faster",
         "Walking swaps your hands item only for one that makes you faster (a cane), so your weapon stays in hand", true),
+    onoff("prefer_axe", "Axe before pickaxe",
+        "When Auto Combat or Equipment Master picks a pickaxe to fight with, use your axe instead if it hits as hard", true),
+    onoff("free_arrow_keys", "Arrow keys only zoom",
+        "Turns off hit-and-run's arrow keys (kiting mode, its auto dodge, range) so the arrows only move the camera", true),
+    onoff("dodge_follows_combat", "Dodge follows Auto Combat",
+        "Auto Dodge is turned on when Auto Combat starts and off when it stops, and stays that way", true),
     {
         name = "explore_key",
         label = "Auto Explore key",

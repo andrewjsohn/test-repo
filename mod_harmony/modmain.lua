@@ -22,6 +22,9 @@ local CFG = {
     fix_explore = GetModConfigData("fix_explore") ~= false,
     keep_light = GetModConfigData("keep_light") ~= false,
     walk_only_faster = GetModConfigData("walk_only_faster") ~= false,
+    free_arrow_keys = GetModConfigData("free_arrow_keys") ~= false,
+    prefer_axe = GetModConfigData("prefer_axe") ~= false,
+    dodge_follows_combat = GetModConfigData("dodge_follows_combat") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -352,6 +355,7 @@ end
 -- off your only light while it is dark is skipped.
 ------------------------------------------------------------------------------
 local walk_swap_depth = 0
+local fight_swap_depth = 0
 local LIGHT_TAGS = nil
 
 local function IsLightItem(item)
@@ -453,30 +457,195 @@ local function GuardWalkSwaps(pc)
     end
 end
 
+local function WithFightSwap(fn, ...)
+    fight_swap_depth = fight_swap_depth + 1
+    local ok, a, b, c = G.pcall(fn, ...)
+    fight_swap_depth = fight_swap_depth - 1
+    if not ok then G.error(a, 0) end
+    return a, b, c
+end
+
 -- Auto Combat (event mode) and hit-and-run ask Equipment Master for walking
--- gear through an EquipItem event of type "walk".
+-- or fighting gear through an EquipItem event of type "walk" or "fight".
 local function GuardWalkEvents(player)
-    if not (CFG.keep_light or CFG.walk_only_faster) or player._mod_harmony_light then return end
+    if not (CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe) or player._mod_harmony_light then return end
     player._mod_harmony_light = true
     local push = player.PushEvent
     player.PushEvent = function(inst, event, data, ...)
-        if event == "EquipItem" and type(data) == "table" and type(data.type) == "string"
-            and data.type:find("walk", 1, true) then
-            return WithWalkSwap(push, inst, event, data, ...)
+        if event == "EquipItem" and type(data) == "table" and type(data.type) == "string" then
+            if data.type:find("walk", 1, true) then
+                return WithWalkSwap(push, inst, event, data, ...)
+            elseif data.type:find("fight", 1, true) then
+                return WithFightSwap(push, inst, event, data, ...)
+            end
         end
         return push(inst, event, data, ...)
     end
 end
 
+------------------------------------------------------------------------------
+-- 7. The axe before the pickaxe
+--
+-- A pickaxe and an axe hit equally hard, and Auto Combat and Equipment
+-- Master both keep the first of equal weapons they find, which is often the
+-- pickaxe. When either of them picks a pickaxe for a fight and you carry an
+-- axe that hits at least as hard, the axe is used instead. A pick/axe counts
+-- as neither, and a pickaxe you equip yourself is left alone.
+------------------------------------------------------------------------------
+local function EachOwnedItem(fn)
+    local player = Player()
+    local inv = player ~= nil and player.replica ~= nil and player.replica.inventory or nil
+    if inv == nil then return end
+    for _, item in pairs(inv:GetEquips() or {}) do fn(item) end
+    for _, item in pairs(inv:GetItems() or {}) do fn(item) end
+    local bag = inv.GetOverflowContainer ~= nil and inv:GetOverflowContainer() or nil
+    if bag ~= nil then
+        for _, item in pairs(bag:GetItems() or {}) do fn(item) end
+    end
+end
+
+local damage_cache = {}
+local function ItemDamage(item)
+    local key = item.prefab
+    if damage_cache[key] ~= nil then
+        return damage_cache[key] or nil
+    end
+    local d = nil
+    local util = G.rawget(G, "CMP_util")
+    local fov = G.rawget(G, "FunctionOrValue")
+    if type(util) == "table" and type(util.GetCMP) == "function" and type(fov) == "function" then
+        local ok, weapon = G.pcall(util.GetCMP, util, key, "weapon")
+        if ok and type(weapon) == "table" then
+            local ok2, v = G.pcall(fov, weapon.damage, weapon.inst)
+            if ok2 then d = tonumber(v) end
+        end
+    end
+    damage_cache[key] = d or false
+    return d
+end
+
+local function IsHandsItem(item)
+    local eq = item.replica ~= nil and item.replica.equippable or nil
+    return eq ~= nil and eq:EquipSlot() == G.EQUIPSLOTS.HANDS
+end
+
+local function IsPickOnly(item)
+    return item:HasTag("MINE_tool") and not item:HasTag("CHOP_tool")
+end
+
+local function IsAxeOnly(item)
+    return item:HasTag("CHOP_tool") and not item:HasTag("MINE_tool")
+end
+
+-- The hardest-hitting axe you carry that hits at least as hard as this
+-- pickaxe, or nil when the item isn't a pickaxe or you carry no such axe.
+local function AxeInsteadOf(pick)
+    if not CFG.prefer_axe or type(pick) ~= "table" or type(pick.HasTag) ~= "function"
+        or not pick:IsValid() or not IsPickOnly(pick) then
+        return nil
+    end
+    local pick_d = ItemDamage(pick)
+    local best, best_d = nil, nil
+    EachOwnedItem(function(item)
+        if item ~= pick and item:IsValid() and IsHandsItem(item) and IsAxeOnly(item)
+            and item:HasTag("weapon") and not item:HasTag("broken") then
+            local d = ItemDamage(item)
+            if pick_d == nil or d == nil or d >= pick_d - 0.001 then
+                local score = d or 0
+                if best == nil or score > best_d then
+                    best, best_d = item, score
+                end
+            end
+        end
+    end)
+    return best
+end
+
+local axe_log_time = -math.huge
+local function LogAxe(pick, axe, who)
+    local now = G.GetTime()
+    if now - axe_log_time > 10 then
+        axe_log_time = now
+        Log(who .. ": " .. tostring(axe.prefab) .. " instead of " .. tostring(pick.prefab))
+    end
+end
+
+local axe_patched = false
+local function PatchAutoCombatAxe()
+    if axe_patched or not CFG.prefer_axe then return end
+    local ac = G.rawget(G, "AutoCombat")
+    local Equip = ac ~= nil and ac.Equip or nil
+    if Equip == nil or type(Equip.FindWeapon) ~= "function" then return end
+    axe_patched = true
+
+    local old_find = Equip.FindWeapon
+    Equip.FindWeapon = function(...)
+        local weapon = old_find(...)
+        local ok, axe = G.pcall(AxeInsteadOf, weapon)
+        if ok and axe ~= nil then
+            LogAxe(weapon, axe, "Auto Combat")
+            return axe
+        end
+        return weapon
+    end
+
+    -- A pickaxe already in hand counts as a weapon, so Auto Combat would keep
+    -- it. While it wants to fight and an axe is there, it isn't good enough.
+    local old_satisfied = Equip.Satisfied
+    if type(old_satisfied) == "function" then
+        Equip.Satisfied = function(self, want, ...)
+            if (want or self.want) == "fight" and type(Equip.Hands) == "function" then
+                local ok, axe = G.pcall(function() return AxeInsteadOf(Equip.Hands()) end)
+                if ok and axe ~= nil then
+                    return false
+                end
+            end
+            return old_satisfied(self, want, ...)
+        end
+    end
+    Log("patched Auto Combat weapon pick (axe before pickaxe)")
+end
+
+-- Equipment Master equips its fight pick inside GetAttackTarget or an
+-- EquipItem "fight" event; the RPC wrapper below swaps a pickaxe for the axe.
+local function GuardFightSwaps(pc)
+    if not CFG.prefer_axe or pc._mod_harmony_fight then return end
+    pc._mod_harmony_fight = true
+    local old = pc.GetAttackTarget
+    if type(old) == "function" then
+        pc.GetAttackTarget = function(...) return WithFightSwap(old, ...) end
+    end
+end
+
+local function AxeForFightRPC(item)
+    if fight_swap_depth <= 0 then return nil end
+    local ok, axe = G.pcall(AxeInsteadOf, item)
+    if not ok or axe == nil then return nil end
+    LogAxe(item, axe, "Equipment Master")
+    return axe
+end
+
 local send_patched = false
 local function PatchSendRPC()
-    if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster) then return end
+    if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe) then return end
     orig_send = G.rawget(G, "SendRPCToServer")
     if type(orig_send) ~= "function" then return end
     send_patched = true
 
     G.rawset(G, "SendRPCToServer", function(code, action, x, z, target, isreleased, controlmods,
                                             noforce, mod_name, platform, ...)
+        if fight_swap_depth > 0 and code == G.RPC.ControllerUseItemOnSelfFromInvTile
+            and action == G.ACTIONS.EQUIP.code then
+            local axe = AxeForFightRPC(x)
+            if axe ~= nil then
+                local player = Player()
+                local inv = player ~= nil and player.replica ~= nil and player.replica.inventory or nil
+                if inv ~= nil and inv:GetEquippedItem(G.EQUIPSLOTS.HANDS) == axe then
+                    return -- the axe is already in hand
+                end
+                x = axe
+            end
+        end
         if walk_swap_depth > 0 and code == G.RPC.ControllerUseItemOnSelfFromInvTile
             and action == G.ACTIONS.EQUIP.code then
             if CFG.keep_light then
@@ -556,12 +725,67 @@ local function BindExploreKey()
 end
 
 ------------------------------------------------------------------------------
+-- 8. Arrow keys only zoom the camera
+--
+-- hit-and-run binds all four arrow keys (Up: kiting mode, Down: its own auto
+-- dodge, Left/Right: its range) through the base library's key handlers,
+-- which look the key up with MOD_util:GetMOption on every press. Observer
+-- Camera uses the arrows to zoom. While one of those hit-and-run keys is
+-- still set to an arrow, it reads as unbound, so only the camera reacts. A
+-- key you move to something else in hit-and-run's settings keeps working.
+------------------------------------------------------------------------------
+local ARROW_OPTIONS = { hitandrun_up = true, hitandrun_down = true, hitandrun_add = true, hitandrun_reduce = true }
+local arrows_patched = false
+local function FreeArrowKeys()
+    if arrows_patched or not CFG.free_arrow_keys then return end
+    local util = G.rawget(G, "MOD_util")
+    if type(util) ~= "table" or type(util.GetMOption) ~= "function" then return end
+    arrows_patched = true
+    local arrow = {}
+    for _, name in ipairs({ "KEY_UP", "KEY_DOWN", "KEY_LEFT", "KEY_RIGHT" }) do
+        local k = G.rawget(G, name)
+        if k ~= nil then arrow[k] = true end
+    end
+    local old = util.GetMOption
+    util.GetMOption = function(self, key, default, ...)
+        local v = old(self, key, default, ...)
+        if ARROW_OPTIONS[key] and v ~= nil and arrow[v] then
+            return false
+        end
+        return v
+    end
+    Log("arrow keys left to the camera")
+end
+
+------------------------------------------------------------------------------
+-- 9. Auto Dodge follows Auto Combat
+--
+-- auto_dodger turns itself on at load and on Z, and Auto Combat only turns it
+-- on while it runs. Here it is simply kept the same as Auto Combat: on while
+-- Auto Combat runs, off while it doesn't.
+------------------------------------------------------------------------------
+local function SyncDodgeWithCombat()
+    if not CFG.dodge_follows_combat then return end
+    local ac = G.rawget(G, "AutoCombat")
+    local set = G.rawget(G, "AutoDodger_SetEnabled")
+    local is_on = G.rawget(G, "AutoDodger_IsEnabled")
+    if type(ac) ~= "table" or type(set) ~= "function" or type(is_on) ~= "function" then return end
+    local want = type(ac.state) == "table" and ac.state.running == true
+    if (is_on() and true or false) ~= want then
+        set(want)
+        Log("Auto Dodge " .. (want and "on" or "off") .. " to match Auto Combat")
+    end
+end
+
+------------------------------------------------------------------------------
 -- Wiring
 ------------------------------------------------------------------------------
 local function InstallAll()
     PatchAutoCombatEquip()
+    PatchAutoCombatAxe()
     PatchAutoDodger()
     PatchSendRPC()
+    FreeArrowKeys()
 end
 
 InstallAll() -- most mods set their globals at load time
@@ -570,6 +794,7 @@ AddComponentPostInit("playercontroller", function(self, inst)
     -- Equipment Master wraps these walking calls first (it loads before us),
     -- so this wrapper sees its gear swaps happen inside them.
     GuardWalkSwaps(self)
+    GuardFightSwaps(self)
 
     -- Manual hands equips from the inventory. ThePlayer may not be set yet
     -- when the component is added, so check whose controller it is per call.
@@ -595,6 +820,13 @@ AddPlayerPostInit(function(player)
         player:DoPeriodicTask(G.FRAMES, function()
             SafeCall("queue freeze", UpdateQueueFreeze, player)
         end)
-        Log("ready: gear", gear_patched, "dodge", dodge_patched, "rpc", send_patched)
+        if CFG.dodge_follows_combat then
+            SafeCall("dodge sync", SyncDodgeWithCombat)
+            player:DoPeriodicTask(0.1, function()
+                SafeCall("dodge sync", SyncDodgeWithCombat)
+            end)
+        end
+        Log("ready: gear", gear_patched, "axe", axe_patched, "dodge", dodge_patched, "rpc", send_patched,
+            "arrows", arrows_patched)
     end)
 end)

@@ -8,6 +8,7 @@ A small client-only Don't Starve Together mod that patches how these mods work t
 - Better Lag Compensation (3813222728)
 - ActionQueue RB3 (2873533916)
 - Auto Explore (3826759911)
+- hit-and-run (3014188454), for its arrow keys only
 
 It doesn't change any of those mods' files. It wraps a few of their functions when the game loads, and every fix can be switched off on its own.
 
@@ -22,6 +23,9 @@ It doesn't change any of those mods' files. It wraps a few of their functions wh
 | Gliding with a frozen pose while exploring | Auto Explore's clicks go straight to the server and skip your game's movement prediction. | Each explore step is also shown on your screen, like a normal click, so you walk normally. |
 | Auto Explore pulls you around in fights | Nothing pauses it. | It pauses while auto_dodger is dodging, hit-and-run has a target, ActionQueue is working, or a creature nearby is targeting you. It resumes on its own afterwards. |
 | Walking swaps your lantern for another item in caves or at night | Equipment Master swaps in its walking item every time you start walking, and only puts a light back after you are already in the dark. | In caves and on dark nights, a walking swap that would take off your only light is skipped. A miner hat or other light still lets it swap. |
+| Auto Combat or Equipment Master fights with the pickaxe | A pickaxe and an axe hit equally hard, and both mods keep the first of equal weapons they find. | When either one picks a pickaxe for a fight and you carry an axe that hits as hard, the axe goes in your hands instead. A pick/axe, a stronger pickaxe, and a pickaxe you equip yourself are left alone. |
+| Arrow keys do more than zoom the camera | hit-and-run uses Up for kiting mode, Down for its own auto dodge, and Left/Right for its range, on top of Observer Camera's zoom. | While those hit-and-run keys are still set to arrows, they do nothing, so the arrows only move the camera. A key you move elsewhere in hit-and-run's settings keeps working. |
+| Auto Dodge on while Auto Combat is off | auto_dodger turns itself on when the game loads and toggles on Z, separately from Auto Combat. | Auto Dodge is kept on exactly while Auto Combat runs and off otherwise, so turning Auto Combat off leaves plain F attacks with no dodging. |
 | Auto Combat misses swings, and walking swaps your weapon for a marbell | With no cane, Equipment Master's walking item is any hands item. Auto Combat asks for walking gear between swings (in Event or Auto gear mode), so the weapon keeps leaving your hands and each opening waits for it to come back. | A walking swap of the hands item is skipped unless the new item is actually faster. With a cane, walking still swaps to it. |
 
 ## Install
@@ -37,8 +41,8 @@ It loads after the mods it patches (priority -100), so mod order doesn't matter.
 ## Not covered
 
 - **Animal Tracker and Cane Kiting both use O.** These are plain key settings, so change one of them in its mod settings rather than patching it here.
-- **Up/Down arrow keys** belong to the hit-and-run mod (kiting mode and its own auto dodge). You can rebind them in that mod's in-game settings.
+- **Z no longer toggles Auto Dodge by itself** while "Dodge follows Auto Combat" is on, because the dodge always matches Auto Combat. Turn that switch off to get Z back.
 
 ## Testing status
 
-This hasn't been run in game yet. The Lua parses cleanly, and every hook is based on the code of the versions installed on 2026-10-31. If something misbehaves, turn on **Debug log** in its settings. The helper then logs what it does to `client_log.txt` under the `[mod_harmony]` tag.
+This hasn't been run in game yet. The Lua parses cleanly, and every hook is based on the code of the versions installed on 2026-10-31 and 2026-11-02. If something misbehaves, turn on **Debug log** in its settings. The helper then logs what it does to `client_log.txt` under the `[mod_harmony]` tag.
