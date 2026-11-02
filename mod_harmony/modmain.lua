@@ -31,6 +31,7 @@ local CFG = {
     spider_dens_last = GetModConfigData("spider_dens_last") ~= false,
     web_slow = GetModConfigData("web_slow") ~= false,
     marotter_spacing = GetModConfigData("marotter_spacing") ~= false,
+    queue_tools = GetModConfigData("queue_tools") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -1384,14 +1385,16 @@ end
 ------------------------------------------------------------------------------
 -- 7g. Trace lines (debug log only)
 --
--- While ActionQueue works and Auto Combat is on: every gear swap and every
--- move or stop sent to the server, with the mods it came from. In fights
--- with Auto Combat on: every hit you take, with what was near you. These
--- show where the next Shift+click or kiting problem comes from.
+-- While Auto Combat is on: every change of what's in your hands. While
+-- ActionQueue works or Auto Combat fights: every gear swap and every move or
+-- stop sent to the server, with the mods it came from. In fights: every hit
+-- you take, with what was near you. These show where the next Shift+click,
+-- weapon or kiting problem comes from.
 ------------------------------------------------------------------------------
 local TRACE_LIMIT = 40
 local trace_count = 0
 local trace_queue = false
+local trace_fight = false
 local trace_hands = nil
 local trace_health = nil
 local rpc_names, action_names = nil, nil
@@ -1428,7 +1431,8 @@ local function Trace(...)
 end
 
 local function TracingWork(player)
-    return CFG.debug_log and player ~= nil and QueueBusy(player) and RunningCombatEquip() ~= nil
+    return CFG.debug_log and player ~= nil and RunningCombatEquip() ~= nil
+        and (QueueBusy(player) or FightingNow(player))
 end
 
 local TRACE_RPCS = { "ControllerUseItemOnSelfFromInvTile", "UseItemFromInvTile", "EquipActionItem",
@@ -1470,9 +1474,19 @@ local function UpdateTrace(player)
     end
     trace_queue = busy
 
+    -- fights with Auto Combat on get their own trace lines
+    local fighting = ac_on and FightingNow(player)
+    if fighting and not trace_fight then
+        trace_count = 0
+        Trace("fight started, hands", tostring(HandsItem(player) and HandsItem(player).prefab))
+    elseif not fighting and trace_fight then
+        Trace("fight over, hands", tostring(HandsItem(player) and HandsItem(player).prefab))
+    end
+    trace_fight = fighting
+
     local held = HandsItem(player)
     if held ~= trace_hands then
-        if busy and ac_on then
+        if ac_on then
             local Equip = ac.Equip
             Trace("hands", tostring(trace_hands and trace_hands.prefab), "->", tostring(held and held.prefab),
                 "AC wants", tostring(type(Equip) == "table" and Equip.want or nil),
@@ -1505,6 +1519,116 @@ local function UpdateTrace(player)
                 #near > 0 and table.concat(near, ", ") or "nothing"))
         end
         trace_health = pct
+    end
+end
+
+------------------------------------------------------------------------------
+-- 7h. Shift+click tools with Auto Combat on
+--
+-- Auto Combat turns movement prediction off while it runs. ActionQueue then
+-- sends each Shift+click straight to the server and skips the step where
+-- Auto Actions swaps in the right tool, so a Shift+click only worked with
+-- the right tool already in hand. With prediction off, the tool Auto Actions
+-- picked for the click is equipped here first, and the click waits (up to
+-- about a second) until it is in hand.
+------------------------------------------------------------------------------
+local QUEUE_TOOL_WAIT = 1.2
+local queue_tool_logged = nil
+
+-- The tool this queued click needs that isn't in your hands yet.
+local function QueueToolFor(aq, act)
+    if not CFG.queue_tools or type(act) ~= "table" or type(act.action) ~= "table" then return nil end
+    local pc = aq.inst ~= nil and aq.inst.components ~= nil and aq.inst.components.playercontroller or nil
+    if pc == nil or pc.ismastersim or pc.locomotor ~= nil then
+        return nil -- prediction on: Auto Actions equips it itself
+    end
+    local tool = act.invobject
+    local id = act.action.id
+    if not IsToolItem(tool) or type(id) ~= "string" or not tool:HasTag(id .. "_tool") then return nil end
+    local inv = aq.inst.replica ~= nil and aq.inst.replica.inventory or nil
+    if inv == nil or inv:GetEquippedItem(G.EQUIPSLOTS.HANDS) == tool then return nil end
+    if inv.GetActiveItem ~= nil and inv:GetActiveItem() == tool then return nil end
+    return tool, inv
+end
+
+local function SendToolEquip(tool)
+    G.SendRPCToServer(G.RPC.ControllerUseItemOnSelfFromInvTile, G.ACTIONS.EQUIP.code, tool)
+end
+
+local queue_tools_patched_on = nil
+local function PatchQueueTools(player)
+    if not CFG.queue_tools or player == nil then return end
+    local aq = player.components ~= nil and player.components.actionqueuer or nil
+    if aq == nil or queue_tools_patched_on == aq or type(aq.SendAction) ~= "function" then return end
+    queue_tools_patched_on = aq
+    local old_send = aq.SendAction
+    aq.SendAction = function(self, act, ...)
+        local tool, inv = SafeCall("queue tool", QueueToolFor, self, act)
+        if tool ~= nil then
+            SafeCall("queue tool", SendToolEquip, tool)
+            if queue_tool_logged ~= tool.prefab then
+                queue_tool_logged = tool.prefab
+                Log("Shift+click with Auto Combat on: equipped", tostring(tool.prefab), "for", tostring(act.action.id))
+            end
+            -- ActionQueue runs this in its own thread, so it can wait here
+            -- (no pcall around the wait: a thread can't pause inside one).
+            local co = G.coroutine ~= nil and G.coroutine.running ~= nil and G.coroutine.running() or nil
+            if co ~= nil and type(G.Sleep) == "function" then
+                local start = G.GetTime()
+                local resent = false
+                while tool:IsValid() and inv:GetEquippedItem(G.EQUIPSLOTS.HANDS) ~= tool
+                    and G.GetTime() - start < QUEUE_TOOL_WAIT do
+                    if not resent and G.GetTime() - start > 0.5 then
+                        resent = true
+                        SafeCall("queue tool", SendToolEquip, tool) -- you may have been busy
+                    end
+                    G.Sleep(G.FRAMES)
+                end
+            end
+        end
+        return old_send(self, act, ...)
+    end
+    Log("patched ActionQueue clicks (tools equip with Auto Combat on)")
+end
+
+------------------------------------------------------------------------------
+-- 7i. The better weapon in a fight
+--
+-- When Auto Combat fights while a tool is still in your hand and you carry
+-- something better for the fight (a real weapon that hits harder, or the axe
+-- instead of a pickaxe), it is equipped here, in case Auto Combat or
+-- Equipment Master doesn't swap it in. A hands item you picked yourself in
+-- the last couple of seconds is left alone.
+------------------------------------------------------------------------------
+local FIGHT_FIX_INTERVAL = 0.5
+local fight_fix_time = -math.huge
+local fight_fix_logged = nil
+
+local function UpdateFightWeapon(player)
+    if not (CFG.prefer_axe or CFG.keep_tools) or player == nil then return end
+    local Equip = RunningCombatEquip()
+    if Equip == nil or not FightingNow(player) then return end
+    local now = G.GetTime()
+    if now - fight_fix_time < FIGHT_FIX_INTERVAL then return end
+    if Equip.want ~= "fight" then return end -- dodging or walking gear
+    if QueueBusy(player) then return end -- a Shift+click or Shift+drag in progress
+    local o = Equip.override
+    if type(o) == "table" and type(o.until_time) == "number" and now < o.until_time then
+        return -- your own pick, or one of Auto Combat's boss scripts
+    end
+    local held = HandsItem(player)
+    if not IsToolItem(held) then return end
+    local better = WeaponOverTool(held, player)
+    if better == nil and CFG.prefer_axe then better = AxeInsteadOf(held) end
+    if better == nil or better == held then return end
+    fight_fix_time = now
+    ac_equip_depth = ac_equip_depth + 1 -- not a tool you picked to work with
+    local ok, err = G.pcall(SendToolEquip, better)
+    ac_equip_depth = ac_equip_depth - 1
+    if not ok then G.error(err, 0) end
+    if fight_fix_logged ~= held.prefab .. ">" .. better.prefab then
+        fight_fix_logged = held.prefab .. ">" .. better.prefab
+        Log("fight: " .. tostring(better.prefab) .. " instead of " .. tostring(held.prefab))
     end
 end
 
@@ -1613,11 +1737,14 @@ AddPlayerPostInit(function(player)
     player:DoTaskInTime(0, function()
         if player ~= Player() then return end
         InstallAll() -- catch anything that registered late
+        SafeCall("queue tools", PatchQueueTools, player)
         BindExploreKey()
         GuardWalkEvents(player)
         player:DoPeriodicTask(G.FRAMES, function()
             SafeCall("queue freeze", UpdateQueueFreeze, player)
+            SafeCall("queue tools", PatchQueueTools, player)
             SafeCall("tool hold", UpdateToolHold, player)
+            SafeCall("fight weapon", UpdateFightWeapon, player)
             SafeCall("trace", UpdateTrace, player)
         end)
         if CFG.dodge_follows_combat then
@@ -1628,6 +1755,6 @@ AddPlayerPostInit(function(player)
         end
         Log("ready: gear", gear_patched, "axe", axe_patched, "dodge", dodge_patched, "rpc", send_patched,
             "arrows", arrows_patched, "tools/kite", own_equip_patched, "tools", tools_patched,
-            "dens", dens_patched, "web", web_patched)
+            "dens", dens_patched, "web", web_patched, "queue tools", queue_tools_patched_on ~= nil)
     end)
 end)

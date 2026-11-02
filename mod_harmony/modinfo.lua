@@ -13,10 +13,13 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Walking in caves or at night never swaps away your only light.
 - Walking only swaps your weapon out for something that is actually
   faster, so Auto Combat has it in hand when it swings.
-- Auto Combat and Equipment Master fight with your axe, not your pickaxe.
+- Auto Combat and Equipment Master fight with your axe, not your pickaxe,
+  and a tool still in hand when a fight starts makes way for it.
 - In the dark, helpers light your way with a lantern instead of a torch.
 - A tool in your hands (a Shift+click with Auto Actions, say) stays there
   while Auto Combat has nothing to fight. In a fight, your real weapon.
+- With Auto Combat on, ActionQueue's Shift+click still swaps in the right
+  tool (Auto Combat turns movement prediction off, which skipped it).
 - Spider dens come last: F takes the spiders first and leaves a den alone
   unless you start on it with Ctrl+F; Auto Combat fights spiders first.
 - On spider webbing, dodging counts on your slower speed.
@@ -29,7 +32,7 @@ ActionQueue RB3 and Auto Explore play nicely together.
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.8"
+version = "0.1.9"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -105,6 +108,8 @@ configuration_options = {
         "In the dark, when a helper equips a torch for light and you carry a lantern with fuel, the lantern is used instead", true),
     onoff("keep_tools", "Tools stay in hand between fights",
         "While Auto Combat has nothing to fight, a tool in your hands stays there. In a fight, Auto Combat uses your real weapon if it hits harder", true),
+    onoff("queue_tools", "Shift+click tools with Auto Combat on",
+        "With Auto Combat on (movement prediction off), the tool Auto Actions picks for a Shift+click is equipped before the click", true),
     onoff("kite_lantern", "Lantern while kiting in the dark",
         "In the dark, Auto Combat uses your lantern to dodge and close in, and your weapon to attack. Auto Actions' and Equipment Master's dark light wait while it attacks", true),
     onoff("spider_dens_last", "Spider dens last",
