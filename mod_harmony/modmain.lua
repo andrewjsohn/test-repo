@@ -25,6 +25,7 @@ local CFG = {
     free_arrow_keys = GetModConfigData("free_arrow_keys") ~= false,
     prefer_axe = GetModConfigData("prefer_axe") ~= false,
     dodge_follows_combat = GetModConfigData("dodge_follows_combat") ~= false,
+    prefer_lantern = GetModConfigData("prefer_lantern") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -468,7 +469,8 @@ end
 -- Auto Combat (event mode) and hit-and-run ask Equipment Master for walking
 -- or fighting gear through an EquipItem event of type "walk" or "fight".
 local function GuardWalkEvents(player)
-    if not (CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe) or player._mod_harmony_light then return end
+    if not (CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe or CFG.prefer_lantern)
+        or player._mod_harmony_light then return end
     player._mod_harmony_light = true
     local push = player.PushEvent
     player.PushEvent = function(inst, event, data, ...)
@@ -609,12 +611,54 @@ end
 -- Equipment Master equips its fight pick inside GetAttackTarget or an
 -- EquipItem "fight" event; the RPC wrapper below swaps a pickaxe for the axe.
 local function GuardFightSwaps(pc)
-    if not CFG.prefer_axe or pc._mod_harmony_fight then return end
+    if not (CFG.prefer_axe or CFG.prefer_lantern) or pc._mod_harmony_fight then return end
     pc._mod_harmony_fight = true
     local old = pc.GetAttackTarget
     if type(old) == "function" then
         pc.GetAttackTarget = function(...) return WithFightSwap(old, ...) end
     end
+end
+
+------------------------------------------------------------------------------
+-- 7b. The lantern before the torch
+--
+-- Equipment Master's night light (and Auto Actions' light in the dark) takes
+-- the first light it finds, often a torch. In the dark, when a helper equips a
+-- torch outside a fight and you carry a lantern with fuel, the lantern goes in
+-- your hands instead. A torch you equip yourself, or one used to set something
+-- on fire in a fight, is left alone.
+------------------------------------------------------------------------------
+local function IsFueledLantern(item)
+    return item:IsValid() and IsHandsItem(item) and item:HasTag("light") and not item:HasTag("lighter")
+        and not item:HasTag("fueldepleted") and not item:HasTag("broken")
+end
+
+local function LanternInsteadOf(torch)
+    if not CFG.prefer_lantern or fight_swap_depth > 0 or type(torch) ~= "table"
+        or type(torch.HasTag) ~= "function" or not torch:IsValid() or not torch:HasTag("torch") then
+        return nil
+    end
+    local player = Player()
+    if player == nil or not IsDarkHere(player) then return nil end
+    local best = nil
+    EachOwnedItem(function(item)
+        if item ~= torch and IsFueledLantern(item) and (best == nil or item.prefab == "lantern") then
+            best = item
+        end
+    end)
+    return best
+end
+
+local lantern_log_time = -math.huge
+local function LanternForRPC(item)
+    local ok, lantern = G.pcall(LanternInsteadOf, item)
+    if not ok or lantern == nil then return nil end
+    local now = G.GetTime()
+    if now - lantern_log_time > 10 then
+        lantern_log_time = now
+        Log(tostring(lantern.prefab) .. " instead of " .. tostring(item.prefab))
+    end
+    return lantern
 end
 
 local function AxeForFightRPC(item)
@@ -627,7 +671,8 @@ end
 
 local send_patched = false
 local function PatchSendRPC()
-    if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe) then return end
+    if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe
+        or CFG.prefer_lantern) then return end
     orig_send = G.rawget(G, "SendRPCToServer")
     if type(orig_send) ~= "function" then return end
     send_patched = true
@@ -646,7 +691,21 @@ local function PatchSendRPC()
                 x = axe
             end
         end
-        if walk_swap_depth > 0 and code == G.RPC.ControllerUseItemOnSelfFromInvTile
+        local light_swap = false
+        if CFG.prefer_lantern and code == G.RPC.ControllerUseItemOnSelfFromInvTile
+            and action == G.ACTIONS.EQUIP.code then
+            local lantern = LanternForRPC(x)
+            if lantern ~= nil then
+                local player = Player()
+                local inv = player ~= nil and player.replica ~= nil and player.replica.inventory or nil
+                if inv ~= nil and inv:GetEquippedItem(G.EQUIPSLOTS.HANDS) == lantern then
+                    return -- the lantern is already in hand
+                end
+                x = lantern
+                light_swap = true -- a light for a light: the walking rules below don't apply
+            end
+        end
+        if walk_swap_depth > 0 and not light_swap and code == G.RPC.ControllerUseItemOnSelfFromInvTile
             and action == G.ACTIONS.EQUIP.code then
             if CFG.keep_light then
                 local ok, lose = G.pcall(WouldLoseLight, x)

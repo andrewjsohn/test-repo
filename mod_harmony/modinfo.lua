@@ -14,13 +14,14 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Walking only swaps your weapon out for something that is actually
   faster, so Auto Combat has it in hand when it swings.
 - Auto Combat and Equipment Master fight with your axe, not your pickaxe.
+- In the dark, helpers light your way with a lantern instead of a torch.
 - The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
 - Auto Dodge is on exactly while Auto Combat is on.
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.5"
+version = "0.1.6"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -92,6 +93,8 @@ configuration_options = {
         "Walking swaps your hands item only for one that makes you faster (a cane), so your weapon stays in hand", true),
     onoff("prefer_axe", "Axe before pickaxe",
         "When Auto Combat or Equipment Master picks a pickaxe to fight with, use your axe instead if it hits as hard", true),
+    onoff("prefer_lantern", "Lantern before torch",
+        "In the dark, when a helper equips a torch for light and you carry a lantern with fuel, the lantern is used instead", true),
     onoff("free_arrow_keys", "Arrow keys only zoom",
         "Turns off hit-and-run's arrow keys (kiting mode, its auto dodge, range) so the arrows only move the camera", true),
     onoff("dodge_follows_combat", "Dodge follows Auto Combat",
