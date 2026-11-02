@@ -26,6 +26,8 @@ local CFG = {
     prefer_axe = GetModConfigData("prefer_axe") ~= false,
     dodge_follows_combat = GetModConfigData("dodge_follows_combat") ~= false,
     prefer_lantern = GetModConfigData("prefer_lantern") ~= false,
+    keep_tools = GetModConfigData("keep_tools") ~= false,
+    kite_lantern = GetModConfigData("kite_lantern") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -33,6 +35,7 @@ local CFG = {
 
 local OWNER = "mod_harmony"
 local AUTO_EXPLORE_ID = "3826759911"
+local AUTO_ACTIONS_ID = "651419070"
 local MAX_DODGE_PAD = 3
 local DEFAULT_PING_MS = 150
 local BASE_SPEED = 6
@@ -661,6 +664,256 @@ local function LanternForRPC(item)
     return lantern
 end
 
+------------------------------------------------------------------------------
+-- 7c. A tool you equip to work stays in hand
+--
+-- With nothing to fight, Auto Combat asks for your weapon every frame, and a
+-- pickaxe isn't good enough for it while an axe hits as hard (7, above). So a
+-- pickaxe that Auto Actions equips for a Shift+click went straight back to
+-- the weapon before the first swing. While Auto Combat runs with no enemy on
+-- you, a tool equipped by anything but Auto Combat stays in hand as long as
+-- you keep working with it.
+------------------------------------------------------------------------------
+local TOOL_TAGS = { "MINE_tool", "CHOP_tool", "DIG_tool", "HAMMER_tool", "NET_tool" }
+local WORK_ACTIONS = { "MINE", "CHOP", "DIG", "HAMMER", "NET" }
+local TOOL_WORK_WINDOW = 4 -- seconds a held tool waits for the next swing
+local ac_equip_depth = 0
+local tool_hold = nil
+local work_codes = nil
+
+local function IsToolItem(item)
+    return type(item) == "table" and type(item.HasOneOfTags) == "function" and item:IsValid()
+        and item:HasOneOfTags(TOOL_TAGS)
+end
+
+local function IsWorkCode(code)
+    if work_codes == nil then
+        work_codes = {}
+        for _, name in ipairs(WORK_ACTIONS) do
+            local act = G.ACTIONS[name]
+            if type(act) == "table" and act.code ~= nil then work_codes[act.code] = true end
+        end
+    end
+    return code ~= nil and work_codes[code] == true
+end
+
+-- Auto Combat's gear module, only while Auto Combat runs.
+local function RunningCombatEquip()
+    local ac = G.rawget(G, "AutoCombat")
+    if type(ac) ~= "table" or type(ac.state) ~= "table" or not ac.state.running then return nil end
+    local Equip = ac.Equip
+    if type(Equip) ~= "table" or type(Equip.Override) ~= "function" then return nil end
+    return Equip
+end
+
+local function HandsItem(player)
+    local inv = player ~= nil and player.replica ~= nil and player.replica.inventory or nil
+    return inv ~= nil and inv:GetEquippedItem(G.EQUIPSLOTS.HANDS) or nil
+end
+
+-- Ask Auto Combat to keep your hands as they are for a moment, without
+-- cutting short a longer "keep" that is already running.
+local function KeepHands(Equip, seconds, now)
+    local o = Equip.override
+    if type(o) == "table" and o.want == "keep" and type(o.until_time) == "number"
+        and o.until_time >= now + seconds then
+        return
+    end
+    Equip:Override("keep", seconds, now)
+end
+
+local function StartToolHold(item)
+    if not CFG.keep_tools or not IsToolItem(item) then return end
+    local Equip = RunningCombatEquip()
+    local player = Player()
+    if Equip == nil or player == nil or EnemyEngaged(player) then return end
+    local now = G.GetTime()
+    local fresh = tool_hold == nil or tool_hold.item ~= item
+    tool_hold = { item = item, equip_time = now, until_time = now + TOOL_WORK_WINDOW }
+    KeepHands(Equip, 0.5, now)
+    if type(Equip.Request) == "function" then
+        Equip:Request("keep", nil, now)
+    end
+    if fresh then
+        Log("tool in hand: Auto Combat leaves", tostring(item.prefab), "alone while you work")
+    end
+end
+
+local function NoteWork()
+    if tool_hold ~= nil then
+        tool_hold.until_time = math.max(tool_hold.until_time, G.GetTime() + TOOL_WORK_WINDOW)
+    end
+end
+
+local function UpdateToolHold(player)
+    local hold = tool_hold
+    if hold == nil then return end
+    local now = G.GetTime()
+    local Equip = RunningCombatEquip()
+    local reason = nil
+    if Equip == nil then
+        reason = "Auto Combat off"
+    elseif not hold.item:IsValid() then
+        reason = "tool gone"
+    elseif EnemyEngaged(player) then
+        reason = "enemy"
+    elseif HandsItem(player) ~= hold.item and now - hold.equip_time > 1 then
+        reason = "tool put away"
+    else
+        if QueueBusy(player) then
+            hold.until_time = math.max(hold.until_time, now + TOOL_WORK_WINDOW)
+        end
+        if now > hold.until_time then reason = "done working" end
+    end
+    if reason ~= nil then
+        tool_hold = nil
+        Log("tool hold over: " .. reason)
+        return
+    end
+    KeepHands(Equip, 0.5, now)
+end
+
+------------------------------------------------------------------------------
+-- 7d. Lantern while kiting, weapon while attacking
+--
+-- In the dark, Auto Combat's walking item (for dodging and closing in) is
+-- your lantern, so it trades weapon and lantern with every attack and every
+-- dodge. While Auto Combat is attacking something, the light that Auto
+-- Actions or Equipment Master equips because it got dark waits, so neither
+-- pulls the lantern back in mid-swing.
+------------------------------------------------------------------------------
+local function KiteLantern(player)
+    if not CFG.kite_lantern or player == nil or not IsDarkHere(player) then return nil end
+    local held = HandsItem(player)
+    if held ~= nil and IsFueledLantern(held) then return held end
+    local best = nil
+    EachOwnedItem(function(item)
+        if IsFueledLantern(item) and (best == nil or item.prefab == "lantern") then
+            best = item
+        end
+    end)
+    return best
+end
+
+local FIGHT_RANGE = 20
+
+local function NearbyAlive(ent, player)
+    if type(ent) ~= "table" or type(ent.IsValid) ~= "function" or not ent:IsValid()
+        or ent:HasTag("isdead") or ent:HasTag("INLIMBO") then
+        return false
+    end
+    local x, y, z = player.Transform:GetWorldPosition()
+    return type(ent.GetDistanceSqToPoint) ~= "function"
+        or ent:GetDistanceSqToPoint(x, y, z) <= FIGHT_RANGE * FIGHT_RANGE
+end
+
+-- Auto Combat is on and has something to fight.
+local function AutoCombatFighting(player)
+    local ac = G.rawget(G, "AutoCombat")
+    if player == nil or type(ac) ~= "table" or type(ac.state) ~= "table" or not ac.state.running then
+        return false
+    end
+    local har = type(ac.Bridge) == "table" and ac.Bridge.hitandrun or nil
+    if type(har) == "table" and type(har.GetTarget) == "function" then
+        local ok, t = G.pcall(har.GetTarget)
+        if ok and NearbyAlive(t, player) then return true end
+    end
+    local ctx = ac.state.ctx
+    if type(ctx) == "table" and NearbyAlive(ctx.target, player) then return true end
+    return EnemyEngaged(player)
+end
+
+local function CalledFromMod(id)
+    local dbg = G.rawget(G, "debug")
+    if dbg == nil or dbg.getinfo == nil then return false end
+    for level = 3, 14 do
+        local info = dbg.getinfo(level, "S")
+        if info == nil then break end
+        local src = info.source
+        if type(src) == "string" and src:find(id, 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- A light that a helper equips because it got dark, while Auto Combat
+-- attacks. Auto Combat's own swaps and walking or fighting swaps don't count.
+local function IsHelperLightInFight(item)
+    if not CFG.kite_lantern or ac_equip_depth > 0 or walk_swap_depth > 0 or fight_swap_depth > 0 then
+        return false
+    end
+    if type(item) ~= "table" or type(item.HasOneOfTags) ~= "function" or not IsLightItem(item) then
+        return false
+    end
+    local player = Player()
+    return player ~= nil and HandsItem(player) ~= item and AutoCombatFighting(player)
+end
+
+local held_light_log_time = -math.huge
+local function LogHeldLight(item, who)
+    local now = G.GetTime()
+    if now - held_light_log_time > 5 then
+        held_light_log_time = now
+        Log("light waits while Auto Combat attacks:", who, tostring(item and item.prefab))
+    end
+end
+
+-- Equipment Master's walking swap during a fight in the dark: the lantern,
+-- not its walking pick.
+local kite_log_time = -math.huge
+local function KiteLanternForRPC(item)
+    if not CFG.kite_lantern or walk_swap_depth <= 0 or RunningCombatEquip() == nil then return nil end
+    if type(item) ~= "table" or type(item.HasOneOfTags) ~= "function" or not item:IsValid()
+        or not IsHandsItem(item) or IsLightItem(item) then
+        return nil
+    end
+    local lantern = KiteLantern(Player())
+    if lantern == nil or lantern == item then return nil end
+    local now = G.GetTime()
+    if now - kite_log_time > 10 then
+        kite_log_time = now
+        Log("kiting in the dark: " .. tostring(lantern.prefab) .. " instead of " .. tostring(item.prefab))
+    end
+    return lantern
+end
+
+local own_equip_patched = false
+local function PatchAutoCombatOwnEquips()
+    if own_equip_patched or not (CFG.keep_tools or CFG.kite_lantern) then return end
+    local ac = G.rawget(G, "AutoCombat")
+    local Equip = ac ~= nil and ac.Equip or nil
+    if Equip == nil or type(Equip.EquipNow) ~= "function" then return end
+    own_equip_patched = true
+
+    -- Remember which equips are Auto Combat's own.
+    local old_now = Equip.EquipNow
+    Equip.EquipNow = function(...)
+        ac_equip_depth = ac_equip_depth + 1
+        local ok, a = G.pcall(old_now, ...)
+        ac_equip_depth = ac_equip_depth - 1
+        if not ok then G.error(a, 0) end
+        return a
+    end
+
+    if CFG.kite_lantern and type(Equip.FindWalkItem) == "function" and type(Equip.IsWalkItem) == "function" then
+        local old_find, old_is = Equip.FindWalkItem, Equip.IsWalkItem
+        Equip.FindWalkItem = function(...)
+            local ok, lantern = G.pcall(KiteLantern, Player())
+            if ok and lantern ~= nil then return lantern end
+            return old_find(...)
+        end
+        -- In the dark only the lantern counts as walking gear, so Auto
+        -- Combat also leaves it in your hands when it has nothing to fight.
+        Equip.IsWalkItem = function(item, ...)
+            local ok, lantern = G.pcall(KiteLantern, Player())
+            if ok and lantern ~= nil then return item ~= nil and item == lantern end
+            return old_is(item, ...)
+        end
+        Log("patched Auto Combat walking gear (lantern while kiting in the dark)")
+    end
+end
+
 local function AxeForFightRPC(item)
     if fight_swap_depth <= 0 then return nil end
     local ok, axe = G.pcall(AxeInsteadOf, item)
@@ -672,13 +925,23 @@ end
 local send_patched = false
 local function PatchSendRPC()
     if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe
-        or CFG.prefer_lantern) then return end
+        or CFG.prefer_lantern or CFG.keep_tools or CFG.kite_lantern) then return end
     orig_send = G.rawget(G, "SendRPCToServer")
     if type(orig_send) ~= "function" then return end
     send_patched = true
 
     G.rawset(G, "SendRPCToServer", function(code, action, x, z, target, isreleased, controlmods,
                                             noforce, mod_name, platform, ...)
+        local self_equip = code == G.RPC.ControllerUseItemOnSelfFromInvTile and action == G.ACTIONS.EQUIP.code
+        if CFG.keep_tools then
+            if self_equip and ac_equip_depth == 0 and walk_swap_depth == 0 and fight_swap_depth == 0 then
+                SafeCall("tool hold", StartToolHold, x) -- Auto Actions' Shift+click equip
+            elseif tool_hold ~= nil and code ~= G.RPC.ControllerUseItemOnSelfFromInvTile
+                and (code == G.RPC.LeftClick or code == G.RPC.RightClick or code == G.RPC.ActionButton
+                    or code == G.RPC.ControllerActionButton) and IsWorkCode(action) then
+                NoteWork()
+            end
+        end
         if fight_swap_depth > 0 and code == G.RPC.ControllerUseItemOnSelfFromInvTile
             and action == G.ACTIONS.EQUIP.code then
             local axe = AxeForFightRPC(x)
@@ -704,6 +967,20 @@ local function PatchSendRPC()
                 x = lantern
                 light_swap = true -- a light for a light: the walking rules below don't apply
             end
+        end
+        if CFG.kite_lantern and self_equip and not light_swap then
+            local ok, lantern = G.pcall(KiteLanternForRPC, x)
+            if ok and lantern ~= nil then
+                if HandsItem(Player()) == lantern then
+                    return -- the lantern is already in hand
+                end
+                x = lantern
+                light_swap = true
+            end
+        end
+        if CFG.kite_lantern and self_equip and SafeCall("helper light", IsHelperLightInFight, x) then
+            LogHeldLight(x, "raw equip")
+            return -- Equipment Master's or Auto Actions' dark light waits for the fight
         end
         if walk_swap_depth > 0 and not light_swap and code == G.RPC.ControllerUseItemOnSelfFromInvTile
             and action == G.ACTIONS.EQUIP.code then
@@ -842,6 +1119,7 @@ end
 local function InstallAll()
     PatchAutoCombatEquip()
     PatchAutoCombatAxe()
+    PatchAutoCombatOwnEquips()
     PatchAutoDodger()
     PatchSendRPC()
     FreeArrowKeys()
@@ -860,10 +1138,19 @@ AddComponentPostInit("playercontroller", function(self, inst)
     local old_use = self.RemoteUseItemFromInvTile
     if type(old_use) == "function" then
         self.RemoteUseItemFromInvTile = function(pc, buffaction, item, ...)
-            if CFG.fix_gear_fight and pc.inst == Player() and buffaction ~= nil and buffaction.action == G.ACTIONS.EQUIP
+            if pc.inst == Player() and buffaction ~= nil and buffaction.action == G.ACTIONS.EQUIP
                 and item ~= nil and item.replica ~= nil and item.replica.equippable ~= nil
                 and item.replica.equippable:EquipSlot() == G.EQUIPSLOTS.HANDS then
-                SafeCall("manual equip", OnManualHandsEquip)
+                -- Auto Actions' light in the dark comes this way too, like
+                -- your own right-click; only its light waits for a fight.
+                if SafeCall("helper light", IsHelperLightInFight, item) and CalledFromMod(AUTO_ACTIONS_ID) then
+                    LogHeldLight(item, "Auto Actions")
+                    return
+                end
+                if CFG.fix_gear_fight then
+                    SafeCall("manual equip", OnManualHandsEquip)
+                end
+                SafeCall("tool hold", StartToolHold, item)
             end
             return old_use(pc, buffaction, item, ...)
         end
@@ -878,6 +1165,7 @@ AddPlayerPostInit(function(player)
         GuardWalkEvents(player)
         player:DoPeriodicTask(G.FRAMES, function()
             SafeCall("queue freeze", UpdateQueueFreeze, player)
+            SafeCall("tool hold", UpdateToolHold, player)
         end)
         if CFG.dodge_follows_combat then
             SafeCall("dodge sync", SyncDodgeWithCombat)
@@ -886,6 +1174,6 @@ AddPlayerPostInit(function(player)
             end)
         end
         Log("ready: gear", gear_patched, "axe", axe_patched, "dodge", dodge_patched, "rpc", send_patched,
-            "arrows", arrows_patched)
+            "arrows", arrows_patched, "tools/kite", own_equip_patched)
     end)
 end)

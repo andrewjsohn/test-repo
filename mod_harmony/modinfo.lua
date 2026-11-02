@@ -15,13 +15,17 @@ ActionQueue RB3 and Auto Explore play nicely together.
   faster, so Auto Combat has it in hand when it swings.
 - Auto Combat and Equipment Master fight with your axe, not your pickaxe.
 - In the dark, helpers light your way with a lantern instead of a torch.
+- A tool equipped to work (a Shift+click with Auto Actions, say) stays in
+  hand while you work, even with Auto Combat on.
+- In the dark, Auto Combat swaps weapon and lantern: weapon to attack,
+  lantern to dodge and close in. Other helpers' lights wait meanwhile.
 - The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
 - Auto Dodge is on exactly while Auto Combat is on.
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.6"
+version = "0.1.7"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -95,6 +99,10 @@ configuration_options = {
         "When Auto Combat or Equipment Master picks a pickaxe to fight with, use your axe instead if it hits as hard", true),
     onoff("prefer_lantern", "Lantern before torch",
         "In the dark, when a helper equips a torch for light and you carry a lantern with fuel, the lantern is used instead", true),
+    onoff("keep_tools", "Tools stay in hand while working",
+        "With Auto Combat on and no enemy on you, a tool you or Auto Actions equip stays in hand while you keep working", true),
+    onoff("kite_lantern", "Lantern while kiting in the dark",
+        "In the dark, Auto Combat uses your lantern to dodge and close in, and your weapon to attack. Auto Actions' and Equipment Master's dark light wait while it attacks", true),
     onoff("free_arrow_keys", "Arrow keys only zoom",
         "Turns off hit-and-run's arrow keys (kiting mode, its auto dodge, range) so the arrows only move the camera", true),
     onoff("dodge_follows_combat", "Dodge follows Auto Combat",
