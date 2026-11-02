@@ -32,6 +32,7 @@ local CFG = {
     web_slow = GetModConfigData("web_slow") ~= false,
     marotter_spacing = GetModConfigData("marotter_spacing") ~= false,
     queue_tools = GetModConfigData("queue_tools") ~= false,
+    dragonfly_first = GetModConfigData("dragonfly_first") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -1523,7 +1524,7 @@ local function UpdateTrace(player)
 end
 
 ------------------------------------------------------------------------------
--- 7h. Shift+click tools with Auto Combat on
+-- 7h. Shift+click tools (with Auto Combat on, and after pickups)
 --
 -- Auto Combat turns movement prediction off while it runs. ActionQueue then
 -- sends each Shift+click straight to the server and skips the step where
@@ -1553,6 +1554,45 @@ end
 
 local function SendToolEquip(tool)
     G.SendRPCToServer(G.RPC.ControllerUseItemOnSelfFromInvTile, G.ACTIONS.EQUIP.code, tool)
+end
+
+-- A queued tree or rock you hold the wrong tool for only gets its chop or
+-- mine from Auto Actions, which builds it from the game's "walk to" click.
+-- The game offers that click only while you stand idle or walk. Pickups end
+-- the moment you stop moving, so the next target is checked mid pickup
+-- animation, gets no action at all, and ActionQueue drops it. When that
+-- happens, the queue waits here (up to two seconds) until you're idle and
+-- asks again.
+local QUEUE_IDLE_WAIT = 2
+local LEFT_WORK_TAGS = { "CHOP_workable", "MINE_workable", "HACK_workable" }
+local RIGHT_WORK_TAGS = { "DIG_workable", "HAMMER_workable" }
+local queue_idle_logged = false
+
+local function ReadyForWalkTo(inst)
+    local sg = inst.sg
+    return (sg == nil or sg:HasStateTag("moving") or sg:HasStateTag("idle"))
+        and (inst:HasTag("moving") or inst:HasTag("idle"))
+end
+
+local function InActionThread(aq)
+    local co = G.coroutine ~= nil and G.coroutine.running ~= nil and G.coroutine.running() or nil
+    local task = aq.action_thread
+    return co ~= nil and type(task) == "table" and task.co == co
+end
+
+local function ShouldWaitForIdle(aq, target, rightclick)
+    if not CFG.queue_tools or type(G.Sleep) ~= "function" then return false end
+    if target == nil or type(target.HasTag) ~= "function" or not target:IsValid() then return false end
+    if aq.inst == nil or not aq.inst:IsValid() or ReadyForWalkTo(aq.inst) then return false end
+    if not InActionThread(aq) then return false end -- only the running queue, never the selection
+    for _, tag in ipairs(rightclick and RIGHT_WORK_TAGS or LEFT_WORK_TAGS) do
+        if target:HasTag(tag) then return true end
+    end
+    return false
+end
+
+local function StillBusy(aq, target)
+    return target:IsValid() and aq.inst:IsValid() and not ReadyForWalkTo(aq.inst)
 end
 
 local queue_tools_patched_on = nil
@@ -1588,7 +1628,28 @@ local function PatchQueueTools(player)
         end
         return old_send(self, act, ...)
     end
-    Log("patched ActionQueue clicks (tools equip with Auto Combat on)")
+    if type(aq.GetAction) == "function" then
+        local old_get = aq.GetAction
+        aq.GetAction = function(self, target, rightclick, ...)
+            local act, rc = old_get(self, target, rightclick, ...)
+            if act ~= nil or not SafeCall("queue wait", ShouldWaitForIdle, self, target, rightclick) then
+                return act, rc
+            end
+            -- outside pcall, as above
+            local start = G.GetTime()
+            while G.GetTime() - start < QUEUE_IDLE_WAIT and SafeCall("queue wait", StillBusy, self, target) do
+                G.Sleep(G.FRAMES)
+            end
+            act, rc = old_get(self, target, rightclick, ...)
+            if act ~= nil and not queue_idle_logged then
+                queue_idle_logged = true
+                Log("Shift+click: waited until idle, then", tostring(type(act.action) == "table" and act.action.id),
+                    tostring(target.prefab))
+            end
+            return act, rc
+        end
+    end
+    Log("patched ActionQueue clicks (tools equip with Auto Combat on, wrong-tool targets wait for idle)")
 end
 
 ------------------------------------------------------------------------------
@@ -1630,6 +1691,106 @@ local function UpdateFightWeapon(player)
         fight_fix_logged = held.prefab .. ">" .. better.prefab
         Log("fight: " .. tostring(better.prefab) .. " instead of " .. tostring(held.prefab))
     end
+end
+
+------------------------------------------------------------------------------
+-- 7j. Dragonfly first: lava larvae left alone while Dragonfly is near
+--
+-- Auto Combat's Dragonfly script clears lava larvae (lavae) within 12 of you
+-- before anything else, and its counter-attack takes any of them within
+-- 5.5. While Dragonfly herself is within DRAGONFLY_NEAR of you, both leave
+-- the larvae alone and the swings stay on Dragonfly. Farther away (say while
+-- she spits larvae from across the arena), the larvae are fought as before.
+-- auto_dodger still dodges them.
+------------------------------------------------------------------------------
+local DRAGONFLY_NEAR = 15
+local LARVA = "lavae"
+local dragonfly_patched = false
+local dragonfly_logged = -math.huge
+
+local function DragonflyNear(ctx)
+    local player = Player()
+    if player == nil or not player:IsValid() then return false end
+    local t = type(ctx) == "table" and ctx.target or nil
+    if t ~= nil and t.prefab == "dragonfly" and t:IsValid() then
+        return player:GetDistanceSqToInst(t) <= DRAGONFLY_NEAR * DRAGONFLY_NEAR
+    end
+    local x, y, z = player.Transform:GetWorldPosition()
+    for _, ent in ipairs(G.TheSim:FindEntities(x, y, z, DRAGONFLY_NEAR, { "epic" }, { "INLIMBO" })) do
+        if ent.prefab == "dragonfly" then return true end
+    end
+    return false
+end
+
+local function SkipLarva(ctx)
+    local ok, near = G.pcall(DragonflyNear, ctx)
+    if not (ok and near) then return false end
+    local now = G.GetTime()
+    if now - dragonfly_logged > 10 then
+        dragonfly_logged = now
+        Log("Dragonfly within " .. DRAGONFLY_NEAR .. ": lava larvae left alone")
+    end
+    return true
+end
+
+local function IsLarvaBehavior(b)
+    if type(b) ~= "table" or b.name ~= "clear_minions" or type(b.run) ~= "function" then return false end
+    for _, prefab in ipairs(type(b.prefabs) == "table" and b.prefabs or {}) do
+        if prefab == LARVA then return true end
+    end
+    return false
+end
+
+local function WrapLarvaBehaviors(list)
+    for _, b in ipairs(type(list) == "table" and list or {}) do
+        if IsLarvaBehavior(b) and not b.mh_dragonfly_first then
+            b.mh_dragonfly_first = true
+            local old_run = b.run
+            b.run = function(self, ctx, ...)
+                if SkipLarva(ctx) then return nil end
+                return old_run(self, ctx, ...)
+            end
+        end
+    end
+end
+
+local function PatchDragonfly()
+    if dragonfly_patched or not CFG.dragonfly_first then return end
+    local ac = G.rawget(G, "AutoCombat")
+    local strat = type(ac) == "table" and ac.Strategy or nil
+    local def = type(strat) == "table" and type(strat.by_prefab) == "table" and strat.by_prefab.dragonfly or nil
+    local brain = type(ac) == "table" and ac.Brain or nil
+    if type(def) ~= "table" or type(brain) ~= "table" or type(brain.Retaliate) ~= "function" then return end
+    dragonfly_patched = true
+
+    -- 1. the "clear larvae first" step of the Dragonfly script
+    WrapLarvaBehaviors(def.behaviors)
+    for _, ph in ipairs(type(def.phases) == "table" and def.phases or {}) do
+        WrapLarvaBehaviors(ph.behaviors)
+        WrapLarvaBehaviors(ph._with_minion)
+    end
+
+    -- 2. the last check before a swing
+    def.combat = def.combat or {}
+    local old_can = def.combat.can_attack
+    def.combat.can_attack = function(ctx, ent, ...)
+        if ent ~= nil and ent.prefab == LARVA and SkipLarva(ctx) then return false end
+        if old_can ~= nil then return old_can(ctx, ent, ...) end
+    end
+
+    -- 3. Auto Combat's counter-attack on anything that comes at you
+    local old_ret = brain.Retaliate
+    brain.Retaliate = function(self, ctx, now, filter, ...)
+        if type(ctx) == "table" and type(ctx.target) == "table" and ctx.target.prefab == "dragonfly" then
+            local inner = filter
+            filter = function(ent)
+                if ent ~= nil and ent.prefab == LARVA and SkipLarva(ctx) then return false end
+                return inner == nil or inner(ent)
+            end
+        end
+        return old_ret(self, ctx, now, filter, ...)
+    end
+    Log("patched Auto Combat Dragonfly (lava larvae left alone while she's within " .. DRAGONFLY_NEAR .. ")")
 end
 
 ------------------------------------------------------------------------------
@@ -1696,6 +1857,7 @@ local function InstallAll()
     PatchAutoDodger()
     PatchWebSpeed()
     PatchSpiderDens()
+    SafeCall("dragonfly", PatchDragonfly)
     PatchSendRPC()
     FreeArrowKeys()
 end
@@ -1745,6 +1907,7 @@ AddPlayerPostInit(function(player)
             SafeCall("queue tools", PatchQueueTools, player)
             SafeCall("tool hold", UpdateToolHold, player)
             SafeCall("fight weapon", UpdateFightWeapon, player)
+            SafeCall("dragonfly", PatchDragonfly)
             SafeCall("trace", UpdateTrace, player)
         end)
         if CFG.dodge_follows_combat then
@@ -1755,6 +1918,7 @@ AddPlayerPostInit(function(player)
         end
         Log("ready: gear", gear_patched, "axe", axe_patched, "dodge", dodge_patched, "rpc", send_patched,
             "arrows", arrows_patched, "tools/kite", own_equip_patched, "tools", tools_patched,
-            "dens", dens_patched, "web", web_patched, "queue tools", queue_tools_patched_on ~= nil)
+            "dens", dens_patched, "web", web_patched, "queue tools", queue_tools_patched_on ~= nil,
+            "dragonfly", dragonfly_patched)
     end)
 end)

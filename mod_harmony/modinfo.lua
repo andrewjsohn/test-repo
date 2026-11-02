@@ -20,9 +20,13 @@ ActionQueue RB3 and Auto Explore play nicely together.
   while Auto Combat has nothing to fight. In a fight, your real weapon.
 - With Auto Combat on, ActionQueue's Shift+click still swaps in the right
   tool (Auto Combat turns movement prediction off, which skipped it).
+- A tree or rock queued with Shift+click alongside pickups is no longer
+  dropped when you hold the wrong tool: the queue waits for the pickup
+  to finish, then switches tools and walks over.
 - Spider dens come last: F takes the spiders first and leaves a den alone
   unless you start on it with Ctrl+F; Auto Combat fights spiders first.
 - On spider webbing, dodging counts on your slower speed.
+- Auto Combat leaves lava larvae alone while Dragonfly is close.
 - A Marotter's quick bite is dodged from its full reach.
 - In the dark, Auto Combat swaps weapon and lantern: weapon to attack,
   lantern to dodge and close in. Other helpers' lights wait meanwhile.
@@ -32,7 +36,7 @@ ActionQueue RB3 and Auto Explore play nicely together.
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.9"
+version = "0.2.0"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -108,8 +112,10 @@ configuration_options = {
         "In the dark, when a helper equips a torch for light and you carry a lantern with fuel, the lantern is used instead", true),
     onoff("keep_tools", "Tools stay in hand between fights",
         "While Auto Combat has nothing to fight, a tool in your hands stays there. In a fight, Auto Combat uses your real weapon if it hits harder", true),
-    onoff("queue_tools", "Shift+click tools with Auto Combat on",
-        "With Auto Combat on (movement prediction off), the tool Auto Actions picks for a Shift+click is equipped before the click", true),
+    onoff("queue_tools", "Shift+click switches tools",
+        "With Auto Combat on, the tool Auto Actions picks for a Shift+click is equipped before the click. After pickups, a queued tree or rock waits until you're idle instead of being dropped", true),
+    onoff("dragonfly_first", "Dragonfly first, larvae later",
+        "While Dragonfly is within 15 of you, Auto Combat leaves lava larvae alone and keeps hitting her. Farther away it clears them as before", true),
     onoff("kite_lantern", "Lantern while kiting in the dark",
         "In the dark, Auto Combat uses your lantern to dodge and close in, and your weapon to attack. Auto Actions' and Equipment Master's dark light wait while it attacks", true),
     onoff("spider_dens_last", "Spider dens last",
