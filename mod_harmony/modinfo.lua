@@ -15,8 +15,12 @@ ActionQueue RB3 and Auto Explore play nicely together.
   faster, so Auto Combat has it in hand when it swings.
 - Auto Combat and Equipment Master fight with your axe, not your pickaxe.
 - In the dark, helpers light your way with a lantern instead of a torch.
-- A tool equipped to work (a Shift+click with Auto Actions, say) stays in
-  hand while you work, even with Auto Combat on.
+- A tool in your hands (a Shift+click with Auto Actions, say) stays there
+  while Auto Combat has nothing to fight. In a fight, your real weapon.
+- Spider dens come last: F takes the spiders first and leaves a den alone
+  unless you start on it with Ctrl+F; Auto Combat fights spiders first.
+- On spider webbing, dodging counts on your slower speed.
+- A Marotter's quick bite is dodged from its full reach.
 - In the dark, Auto Combat swaps weapon and lantern: weapon to attack,
   lantern to dodge and close in. Other helpers' lights wait meanwhile.
 - The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
@@ -25,7 +29,7 @@ ActionQueue RB3 and Auto Explore play nicely together.
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.1.7"
+version = "0.1.8"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -99,10 +103,16 @@ configuration_options = {
         "When Auto Combat or Equipment Master picks a pickaxe to fight with, use your axe instead if it hits as hard", true),
     onoff("prefer_lantern", "Lantern before torch",
         "In the dark, when a helper equips a torch for light and you carry a lantern with fuel, the lantern is used instead", true),
-    onoff("keep_tools", "Tools stay in hand while working",
-        "With Auto Combat on and no enemy on you, a tool you or Auto Actions equip stays in hand while you keep working", true),
+    onoff("keep_tools", "Tools stay in hand between fights",
+        "While Auto Combat has nothing to fight, a tool in your hands stays there. In a fight, Auto Combat uses your real weapon if it hits harder", true),
     onoff("kite_lantern", "Lantern while kiting in the dark",
         "In the dark, Auto Combat uses your lantern to dodge and close in, and your weapon to attack. Auto Actions' and Equipment Master's dark light wait while it attacks", true),
+    onoff("spider_dens_last", "Spider dens last",
+        "F takes nearby spiders before a den and only hits a den you started on with Ctrl+F. Auto Combat fights spiders first, then the den", true),
+    onoff("web_slow", "Dodge knows webbing slows you",
+        "On spider webbing, dodging counts on your real (slower) speed and keeps a bit more distance", true),
+    onoff("marotter_spacing", "Marotter spacing",
+        "A Marotter's quick bite is dodged from its full reach instead of a shrinking circle", true),
     onoff("free_arrow_keys", "Arrow keys only zoom",
         "Turns off hit-and-run's arrow keys (kiting mode, its auto dodge, range) so the arrows only move the camera", true),
     onoff("dodge_follows_combat", "Dodge follows Auto Combat",

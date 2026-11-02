@@ -9,8 +9,8 @@ local G = GLOBAL
 
 -- A mod's environment only carries a few Lua basics (tonumber is not one of
 -- them), so take every builtin used below from the real global table.
-local tonumber, tostring, type, ipairs, pairs, print, math =
-    G.tonumber, G.tostring, G.type, G.ipairs, G.pairs, G.print, G.math
+local tonumber, tostring, type, ipairs, pairs, print, math, string, table =
+    G.tonumber, G.tostring, G.type, G.ipairs, G.pairs, G.print, G.math, G.string, G.table
 
 local CFG = {
     fix_gear_fight = GetModConfigData("fix_gear_fight") ~= false,
@@ -28,6 +28,9 @@ local CFG = {
     prefer_lantern = GetModConfigData("prefer_lantern") ~= false,
     keep_tools = GetModConfigData("keep_tools") ~= false,
     kite_lantern = GetModConfigData("kite_lantern") ~= false,
+    spider_dens_last = GetModConfigData("spider_dens_last") ~= false,
+    web_slow = GetModConfigData("web_slow") ~= false,
+    marotter_spacing = GetModConfigData("marotter_spacing") ~= false,
     explore_key = GetModConfigData("explore_key") or "KEY_F1",
     explore_fight_radius = tonumber(GetModConfigData("explore_fight_radius")) or 12,
     debug_log = GetModConfigData("debug_log") == true,
@@ -145,6 +148,34 @@ end
 local dodge_patched = false
 local inner_filter, inner_owner = nil, nil
 
+-- Spider webbing (ground creep) slows you to 60% unless you are Webber.
+-- auto_dodger works out how far you can run from your gear alone, so on
+-- webbing it thought you were faster than you are.
+local WEB_SLOW = 0.6
+local WEB_EXTRA_MARGIN = 0.5
+local function OnWeb(player)
+    if player == nil or player.Transform == nil or player:HasTag("spiderwhisperer") then return false end
+    local world = G.rawget(G, "TheWorld")
+    local creep = world ~= nil and world.GroundCreep or nil
+    if creep == nil or type(creep.OnCreep) ~= "function" then return false end
+    local x, y, z = player.Transform:GetWorldPosition()
+    local ok, on = G.pcall(creep.OnCreep, creep, x, 0, z)
+    return ok and on == true
+end
+
+-- Quick bites (a Marotter's lands half a second after it starts) leave no
+-- time to run out of a circle that auto_dodger has already shrunk, so their
+-- danger circle stays at the bite's full reach for the whole wind-up.
+local FULL_REACH_BITES = { otter = true }
+local function FullReach(ent)
+    local combat = ent.replica ~= nil and ent.replica.combat or nil
+    local range = combat ~= nil and combat:GetAttackRangeWithWeapon() or nil
+    if type(range) ~= "number" or range <= 0 then return nil end
+    local player = Player()
+    local body = player ~= nil and type(player.GetPhysicsRadius) == "function" and player:GetPhysicsRadius(0) or 0.5
+    return range + body + 0.5
+end
+
 local function PadDanger(posdata)
     if posdata == nil or posdata.zone ~= nil or posdata.ent == nil then
         return -- only creature attacks; strategy zones keep their own shapes
@@ -159,14 +190,18 @@ local function PadDanger(posdata)
     end
     local radius = posdata.radius
     if type(radius) ~= "number" or radius <= 0 then return end
+    if CFG.marotter_spacing and FULL_REACH_BITES[posdata.ent.prefab] then
+        local reach = FullReach(posdata.ent)
+        if reach ~= nil and reach > radius then radius = reach end
+    end
     local speed_fn = G.rawget(G, "AutoDodger_GetSpeed")
     local speed = speed_fn ~= nil and SafeCall("dodger speed", speed_fn) or BASE_SPEED
     if type(speed) ~= "number" or speed <= 0 then speed = BASE_SPEED end
     local pad = PingSeconds() * CFG.dodge_ping_scale * speed + CFG.dodge_extra_margin
+    if CFG.web_slow and OnWeb(Player()) then pad = pad + WEB_EXTRA_MARGIN end
     if pad > MAX_DODGE_PAD then pad = MAX_DODGE_PAD end
-    if pad > 0 then
-        posdata.radius = radius + pad
-    end
+    if pad < 0 then pad = 0 end
+    posdata.radius = radius + pad
 end
 
 local function CompositeFilter(posdata)
@@ -211,6 +246,36 @@ local function PatchAutoDodger()
 
     set("filter_danger", CompositeFilter, OWNER)
     Log("patched auto_dodger hooks")
+end
+
+-- auto_dodger's run speed (it also feeds Auto Combat's boss scripts) counts
+-- the webbing under you.
+local web_patched = false
+local function PatchWebSpeed()
+    if web_patched or not CFG.web_slow then return end
+    local fn = G.rawget(G, "AutoDodger_GetSpeed")
+    local dbg = G.rawget(G, "debug")
+    if type(fn) ~= "function" or dbg == nil or type(dbg.getupvalue) ~= "function" then return end
+    local dodger = nil
+    for i = 1, 20 do
+        local name, v = dbg.getupvalue(fn, i)
+        if name == nil then break end
+        if type(v) == "table" and type(G.rawget(v, "GetSpeed")) == "function" then
+            dodger = v
+            break
+        end
+    end
+    if dodger == nil then return end
+    web_patched = true
+    local old = dodger.GetSpeed
+    dodger.GetSpeed = function(self, ...)
+        local speed = old(self, ...)
+        if type(speed) == "number" and OnWeb(Player()) then
+            return speed * WEB_SLOW
+        end
+        return speed
+    end
+    Log("patched auto_dodger speed (webbing slows you)")
 end
 
 ------------------------------------------------------------------------------
@@ -922,6 +987,7 @@ local function AxeForFightRPC(item)
     return axe
 end
 
+local TraceRPC -- 7g, below
 local send_patched = false
 local function PatchSendRPC()
     if send_patched or not (CFG.fix_explore or CFG.keep_light or CFG.walk_only_faster or CFG.prefer_axe
@@ -933,6 +999,7 @@ local function PatchSendRPC()
     G.rawset(G, "SendRPCToServer", function(code, action, x, z, target, isreleased, controlmods,
                                             noforce, mod_name, platform, ...)
         local self_equip = code == G.RPC.ControllerUseItemOnSelfFromInvTile and action == G.ACTIONS.EQUIP.code
+        if CFG.debug_log then SafeCall("trace", TraceRPC, code, action, x) end
         if CFG.keep_tools then
             if self_equip and ac_equip_depth == 0 and walk_swap_depth == 0 and fight_swap_depth == 0 then
                 SafeCall("tool hold", StartToolHold, x) -- Auto Actions' Shift+click equip
@@ -1061,6 +1128,387 @@ local function BindExploreKey()
 end
 
 ------------------------------------------------------------------------------
+-- 7e. Tools stay in hand until there's something to fight
+--
+-- With nothing to fight, Auto Combat wants your weapon in hand. A pickaxe
+-- counted as a weapon to it only while you carry no axe (7 prefers the axe),
+-- so a Shift+click pickaxe went back to the weapon before the first swing.
+-- Now any tool in hand (pickaxe, axe, shovel, hammer, net) is left alone
+-- while Auto Combat has nothing to fight, however it got there. Once a fight
+-- starts, a tool only stays if no real weapon hits harder.
+------------------------------------------------------------------------------
+local NOT_FIGHT_WEAPONS = { cane = true, orangestaff = true, king_cane = true, walking_stick = true,
+    compass = true, vault_compass = true }
+
+-- Auto Combat asks several times a frame; look around once per frame.
+local fighting_time, fighting_value = nil, false
+local function FightingNow(player)
+    local now = G.GetTime()
+    if fighting_time ~= now then
+        fighting_time = now
+        fighting_value = AutoCombatFighting(player) and true or false
+    end
+    return fighting_value
+end
+
+local function IdleTool(player)
+    if not CFG.keep_tools or player == nil then return nil end
+    local held = HandsItem(player)
+    if not IsToolItem(held) or FightingNow(player) then return nil end
+    return held
+end
+
+-- Your hardest-hitting weapon that is not a tool, a light or a cane.
+local function BestRealWeapon()
+    local best, best_d = nil, nil
+    EachOwnedItem(function(item)
+        if item:IsValid() and IsHandsItem(item) and item:HasTag("weapon") and not item:HasTag("broken")
+            and not item:HasTag("_stackable") and not IsToolItem(item) and not IsLightItem(item)
+            and not item:HasTag("lighter") and not NOT_FIGHT_WEAPONS[item.prefab] then
+            local d = ItemDamage(item)
+            if d ~= nil and (best_d == nil or d > best_d) then
+                best, best_d = item, d
+            end
+        end
+    end)
+    return best, best_d
+end
+
+-- In a fight, the real weapon to use instead of this tool, if it hits harder.
+local function WeaponOverTool(tool, player)
+    if not CFG.keep_tools or player == nil or not IsToolItem(tool) or not FightingNow(player) then return nil end
+    local best, best_d = BestRealWeapon()
+    if best == nil then return nil end
+    local tool_d = ItemDamage(tool) or 0
+    if best_d > tool_d + 0.001 then return best end
+    return nil
+end
+
+local tools_patched = false
+local idle_tool_logged = nil
+local function PatchAutoCombatTools()
+    if tools_patched or not CFG.keep_tools then return end
+    local ac = G.rawget(G, "AutoCombat")
+    local Equip = ac ~= nil and ac.Equip or nil
+    if Equip == nil or type(Equip.Request) ~= "function" or type(Equip.Satisfied) ~= "function"
+        or type(Equip.FindWeapon) ~= "function" then
+        return
+    end
+    tools_patched = true
+
+    local old_satisfied = Equip.Satisfied
+    Equip.Satisfied = function(self, want, ...)
+        if (want or self.want) == "fight" then
+            local player = Player()
+            local ok, idle = G.pcall(IdleTool, player)
+            if ok and idle ~= nil then return true end
+            local ok2, better = G.pcall(WeaponOverTool, HandsItem(player), player)
+            if ok2 and better ~= nil then return false end
+        end
+        return old_satisfied(self, want, ...)
+    end
+
+    local old_request = Equip.Request
+    Equip.Request = function(self, want, ...)
+        if want == "fight" then
+            local ok, idle = G.pcall(IdleTool, Player())
+            if ok and idle ~= nil then
+                if idle_tool_logged ~= idle then
+                    idle_tool_logged = idle
+                    Log("tool in hand: Auto Combat leaves", tostring(idle.prefab), "alone until there's something to fight")
+                end
+                return old_request(self, "keep", ...) -- drops the old weapon request (1)
+            end
+        end
+        idle_tool_logged = nil
+        return old_request(self, want, ...)
+    end
+
+    local old_find = Equip.FindWeapon
+    Equip.FindWeapon = function(...)
+        local weapon = old_find(...)
+        local ok, better = G.pcall(WeaponOverTool, weapon, Player())
+        if ok and better ~= nil then return better end
+        return weapon
+    end
+    Log("patched Auto Combat tools (tool stays in hand between fights)")
+end
+
+------------------------------------------------------------------------------
+-- 7f. Spider dens last
+--
+-- A spider den is a hostile target to the game, to hit-and-run and to Auto
+-- Combat, and it is usually the closest thing, so it got hit while spiders
+-- bit you. Now:
+-- - Attack (F) without force attack treats a den like a neutral creature:
+--   spiders nearby come first, and a den is only hit once you've started on
+--   it with Ctrl+F (then holding F keeps going, as with any creature).
+-- - Auto Combat fights every spider it can reach first and the den last.
+------------------------------------------------------------------------------
+local DEN_PREFABS = { spiderden = true, spiderden_2 = true, spiderden_3 = true, spiderhole = true,
+    spiderhole_rock = true, moonspiderden = true }
+local FOE_EXCLUDE = { "INLIMBO", "player", "playerghost", "wall", "structure", "notarget", "isdead", "spiderden" }
+local DEN_FOE_RANGE = 12
+
+local function IsDen(ent)
+    return type(ent) == "table" and type(ent.IsValid) == "function" and ent:IsValid()
+        and (DEN_PREFABS[ent.prefab] == true or ent:HasTag("spiderden"))
+end
+
+local function ForceAttackHeld()
+    local input = G.rawget(G, "TheInput")
+    if input == nil then return false end
+    local control = G.rawget(G, "CONTROL_FORCE_ATTACK")
+    if control ~= nil and input:IsControlPressed(control) then return true end
+    -- hit-and-run's own "attack anything" key (Ctrl unless changed)
+    local har, util = G.rawget(G, "HitAndRun"), G.rawget(G, "MOD_util")
+    if type(har) == "table" and type(util) == "table" and type(util.GetMOption) == "function"
+        and type(input.IsKeyDown) == "function" then
+        local ok, key = G.pcall(util.GetMOption, util, "hitandrun_ctrl_key", G.rawget(har, "ctrl_key"))
+        if ok and type(key) == "number" and input:IsKeyDown(key) then return true end
+    end
+    return false
+end
+
+-- Creatures that aren't dens and are out to fight you, nearest first.
+local function FoesNear(player, range)
+    local combat = player.replica ~= nil and player.replica.combat or nil
+    local x, y, z = player.Transform:GetWorldPosition()
+    local list = {}
+    for _, ent in ipairs(G.TheSim:FindEntities(x, y, z, range, { "_combat" }, FOE_EXCLUDE)) do
+        local c = ent.replica ~= nil and ent.replica.combat or nil
+        local health = ent.replica ~= nil and ent.replica.health or nil
+        if c ~= nil and not IsDen(ent) and not (health ~= nil and health:IsDead())
+            and (combat == nil or (combat:CanTarget(ent) and not combat:IsAlly(ent)))
+            and (c:GetTarget() == player or ent:HasTag("hostile")) then
+            list[#list + 1] = { ent = ent, d = ent:GetDistanceSqToPoint(x, y, z) }
+        end
+    end
+    table.sort(list, function(a, b) return a.d < b.d end)
+    return list
+end
+
+local function RecentTarget(player, ent)
+    local combat = player.replica ~= nil and player.replica.combat or nil
+    if combat == nil then return false end
+    if combat:GetTarget() == ent then return true end
+    return type(combat.IsRecentTarget) == "function" and combat:IsRecentTarget(ent) == true
+end
+
+local den_log_time = -math.huge
+local function LogDen(what)
+    local now = G.GetTime()
+    if now - den_log_time > 5 then
+        den_log_time = now
+        Log("spider den last:", what)
+    end
+end
+
+-- The attack key's target (also hit-and-run's in its game-targeting mode).
+local function GuardDenTargets(pc)
+    if not CFG.spider_dens_last or pc._mod_harmony_dens then return end
+    pc._mod_harmony_dens = true
+    local old = pc.GetAttackTarget
+    if type(old) ~= "function" then return end
+    pc.GetAttackTarget = function(self, force_attack, force_target, isretarget, use_remote_predict, ...)
+        local target = old(self, force_attack, force_target, isretarget, use_remote_predict, ...)
+        if force_attack or not IsDen(target) or self.inst ~= Player() then return target end
+        local ok, forced = G.pcall(ForceAttackHeld)
+        if ok and forced then return target end
+        local player = self.inst
+        local ok2, foes = G.pcall(FoesNear, player, DEN_FOE_RANGE)
+        if ok2 then
+            for i = 1, math.min(#foes, 8) do
+                local t = old(self, false, foes[i].ent, false, use_remote_predict, ...)
+                if t ~= nil and not IsDen(t) then
+                    LogDen("attack key took " .. tostring(t.prefab) .. " over the den")
+                    return t
+                end
+            end
+        end
+        if RecentTarget(player, target) then return target end
+        LogDen("attack key skipped the den (Ctrl+F hits it)")
+        return nil
+    end
+end
+
+local dens_patched = false
+local function PatchSpiderDens()
+    if dens_patched or not CFG.spider_dens_last then return end
+    local har = G.rawget(G, "HitAndRun")
+    local ac = G.rawget(G, "AutoCombat")
+    local brain = type(ac) == "table" and ac.Brain or nil
+    if type(har) ~= "table" or type(har.GetClosestTarget) ~= "function" then return end
+    dens_patched = true
+
+    -- hit-and-run's own pick
+    local old_closest = har.GetClosestTarget
+    har.GetClosestTarget = function(self, ...)
+        local target = old_closest(self, ...)
+        if not IsDen(target) then return target end
+        local ok, forced = G.pcall(ForceAttackHeld)
+        if ok and forced then return target end
+        local player = Player()
+        if player == nil then return target end
+        local ok2, foes = G.pcall(FoesNear, player, DEN_FOE_RANGE)
+        if ok2 and foes[1] ~= nil then
+            LogDen("hit-and-run took " .. tostring(foes[1].ent.prefab) .. " over the den")
+            return foes[1].ent
+        end
+        local running = type(ac) == "table" and type(ac.state) == "table" and ac.state.running
+        if running or RecentTarget(player, target) then return target end
+        return nil
+    end
+
+    -- Auto Combat keeps a locked target; a den lock gives way to any spider.
+    if type(brain) == "table" and type(brain.LockTarget) == "function" then
+        local old_lock = brain.LockTarget
+        brain.LockTarget = function(self, ent, ...)
+            local locked = old_lock(self, ent, ...)
+            if not IsDen(locked) then return locked end
+            local ok, forced = G.pcall(ForceAttackHeld)
+            if ok and forced then return locked end
+            local player = Player()
+            local ok2, foes = G.pcall(FoesNear, player, DEN_FOE_RANGE)
+            if ok2 and foes[1] ~= nil then
+                LogDen("Auto Combat took " .. tostring(foes[1].ent.prefab) .. " over the den")
+                self.locked_target = foes[1].ent
+                return foes[1].ent
+            end
+            return locked
+        end
+    end
+    Log("patched spider dens (spiders first)")
+end
+
+------------------------------------------------------------------------------
+-- 7g. Trace lines (debug log only)
+--
+-- While ActionQueue works and Auto Combat is on: every gear swap and every
+-- move or stop sent to the server, with the mods it came from. In fights
+-- with Auto Combat on: every hit you take, with what was near you. These
+-- show where the next Shift+click or kiting problem comes from.
+------------------------------------------------------------------------------
+local TRACE_LIMIT = 40
+local trace_count = 0
+local trace_queue = false
+local trace_hands = nil
+local trace_health = nil
+local rpc_names, action_names = nil, nil
+
+local function NameIn(tbl, value)
+    if type(tbl) ~= "table" then return tostring(value) end
+    for k, v in pairs(tbl) do
+        if v == value or (type(v) == "table" and v.code == value) then return tostring(k) end
+    end
+    return tostring(value)
+end
+
+local function CallerMods()
+    local dbg = G.rawget(G, "debug")
+    if dbg == nil or dbg.getinfo == nil then return "?" end
+    local seen, list = {}, {}
+    for level = 3, 24 do
+        local info = dbg.getinfo(level, "S")
+        if info == nil then break end
+        local src = type(info.source) == "string" and info.source or ""
+        local mod = src:match("mods[/\\]([^/\\]+)")
+        if mod ~= nil and mod ~= modname and not seen[mod] then
+            seen[mod] = true
+            list[#list + 1] = mod
+        end
+    end
+    return #list > 0 and table.concat(list, ",") or "game"
+end
+
+local function Trace(...)
+    if trace_count >= TRACE_LIMIT then return end
+    trace_count = trace_count + 1
+    Log("trace:", ...)
+end
+
+local function TracingWork(player)
+    return CFG.debug_log and player ~= nil and QueueBusy(player) and RunningCombatEquip() ~= nil
+end
+
+local TRACE_RPCS = { "ControllerUseItemOnSelfFromInvTile", "UseItemFromInvTile", "EquipActionItem",
+    "SwapEquipWithActiveItem", "TakeActiveItemFromEquipSlot", "StopWalking", "PredictWalking",
+    "DirectWalking", "DragWalking", "AttackButton", "ControllerAttackButton", "LeftClick", "RightClick" }
+local trace_rpc_set = nil
+
+function TraceRPC(code, action, x)
+    local player = Player()
+    if not TracingWork(player) then return end
+    if trace_rpc_set == nil then
+        trace_rpc_set = {}
+        for _, name in ipairs(TRACE_RPCS) do
+            local c = G.RPC[name]
+            if c ~= nil then trace_rpc_set[c] = name end
+        end
+    end
+    local name = trace_rpc_set[code]
+    if name == nil then return end
+    if (name == "LeftClick" or name == "RightClick") and IsWorkCode(action) then return end -- the work itself
+    local item = type(x) == "table" and x or (type(action) == "table" and action or nil)
+    local what = item ~= nil and item.prefab ~= nil and tostring(item.prefab) or ""
+    local act = (name == "LeftClick" or name == "RightClick" or name == "ControllerUseItemOnSelfFromInvTile")
+        and NameIn(G.ACTIONS, action) or ""
+    Trace("sent", name, act, what, "from", CallerMods())
+end
+
+local function UpdateTrace(player)
+    if not CFG.debug_log or player == nil then return end
+    local ac = G.rawget(G, "AutoCombat")
+    local ac_on = type(ac) == "table" and type(ac.state) == "table" and ac.state.running == true
+    local busy = QueueBusy(player)
+    if busy and not trace_queue and ac_on then
+        trace_count = 0
+        Trace("queue started, hands", tostring(HandsItem(player) and HandsItem(player).prefab))
+    elseif not busy and trace_queue and ac_on then
+        Trace("queue ended, hands", tostring(HandsItem(player) and HandsItem(player).prefab),
+            "fighting", tostring(AutoCombatFighting(player)))
+    end
+    trace_queue = busy
+
+    local held = HandsItem(player)
+    if held ~= trace_hands then
+        if busy and ac_on then
+            local Equip = ac.Equip
+            Trace("hands", tostring(trace_hands and trace_hands.prefab), "->", tostring(held and held.prefab),
+                "AC wants", tostring(type(Equip) == "table" and Equip.want or nil),
+                "fighting", tostring(AutoCombatFighting(player)))
+        end
+        trace_hands = held
+    end
+
+    -- hits taken while Auto Combat runs
+    local health = player.replica ~= nil and player.replica.health or nil
+    local pct = health ~= nil and type(health.GetPercent) == "function" and health:GetPercent() or nil
+    if type(pct) == "number" then
+        if ac_on and trace_health ~= nil and pct < trace_health - 0.001 then
+            local max = type(health.Max) == "function" and health:Max() or 100
+            local x, y, z = player.Transform:GetWorldPosition()
+            local near = {}
+            for _, ent in ipairs(G.TheSim:FindEntities(x, y, z, 8, { "_combat" }, { "INLIMBO", "player" })) do
+                if #near >= 4 then break end
+                local c = ent.replica ~= nil and ent.replica.combat or nil
+                near[#near + 1] = string.format("%s %.1f%s", tostring(ent.prefab),
+                    math.sqrt(ent:GetDistanceSqToPoint(x, y, z)), c ~= nil and c:GetTarget() == player and " (on you)" or "")
+            end
+            local dodging = G.rawget(G, "AutoDodger_IsDodging")
+            local speed = G.rawget(G, "AutoDodger_GetSpeed")
+            local ok_s, s = G.pcall(function() return speed ~= nil and speed() or nil end)
+            Log(string.format("hit: lost %.0f health (now %.0f%%), dodging %s, speed %s, webbing %s, near: %s",
+                (trace_health - pct) * max, pct * 100,
+                tostring(dodging ~= nil and SafeCall("dodging", dodging) or false),
+                ok_s and s ~= nil and string.format("%.1f", s) or "?", tostring(OnWeb(player)),
+                #near > 0 and table.concat(near, ", ") or "nothing"))
+        end
+        trace_health = pct
+    end
+end
+
+------------------------------------------------------------------------------
 -- 8. Arrow keys only zoom the camera
 --
 -- hit-and-run binds all four arrow keys (Up: kiting mode, Down: its own auto
@@ -1120,7 +1568,10 @@ local function InstallAll()
     PatchAutoCombatEquip()
     PatchAutoCombatAxe()
     PatchAutoCombatOwnEquips()
+    PatchAutoCombatTools() -- after the axe patch, so it is asked first
     PatchAutoDodger()
+    PatchWebSpeed()
+    PatchSpiderDens()
     PatchSendRPC()
     FreeArrowKeys()
 end
@@ -1132,6 +1583,7 @@ AddComponentPostInit("playercontroller", function(self, inst)
     -- so this wrapper sees its gear swaps happen inside them.
     GuardWalkSwaps(self)
     GuardFightSwaps(self)
+    GuardDenTargets(self)
 
     -- Manual hands equips from the inventory. ThePlayer may not be set yet
     -- when the component is added, so check whose controller it is per call.
@@ -1166,6 +1618,7 @@ AddPlayerPostInit(function(player)
         player:DoPeriodicTask(G.FRAMES, function()
             SafeCall("queue freeze", UpdateQueueFreeze, player)
             SafeCall("tool hold", UpdateToolHold, player)
+            SafeCall("trace", UpdateTrace, player)
         end)
         if CFG.dodge_follows_combat then
             SafeCall("dodge sync", SyncDodgeWithCombat)
@@ -1174,6 +1627,7 @@ AddPlayerPostInit(function(player)
             end)
         end
         Log("ready: gear", gear_patched, "axe", axe_patched, "dodge", dodge_patched, "rpc", send_patched,
-            "arrows", arrows_patched, "tools/kite", own_equip_patched)
+            "arrows", arrows_patched, "tools/kite", own_equip_patched, "tools", tools_patched,
+            "dens", dens_patched, "web", web_patched)
     end)
 end)
