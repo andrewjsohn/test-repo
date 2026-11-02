@@ -13,8 +13,9 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Walking in caves or at night never swaps away your only light.
 - Walking only swaps your weapon out for something that is actually
   faster, so Auto Combat has it in hand when it swings.
-- Auto Combat and Equipment Master fight with your axe, not your pickaxe,
-  and a tool still in hand when a fight starts makes way for it.
+- Auto Combat and Equipment Master fight with your axe before a pickaxe
+  or shovel, and a spear before a marbell. A tool still in hand when a
+  fight starts makes way for the weapon.
 - In the dark, helpers light your way with a lantern instead of a torch.
 - A tool in your hands (a Shift+click with Auto Actions, say) stays there
   while Auto Combat has nothing to fight. In a fight, your real weapon.
@@ -26,17 +27,24 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Spider dens come last: F takes the spiders first and leaves a den alone
   unless you start on it with Ctrl+F; Auto Combat fights spiders first.
 - On spider webbing, dodging counts on your slower speed.
-- Auto Combat leaves lava larvae alone while Dragonfly is close.
+- Auto Combat leaves lava larvae alone while Dragonfly is close, and keeps
+  swinging at full speed.
 - A Marotter's quick bite is dodged from its full reach.
-- In the dark, Auto Combat swaps weapon and lantern: weapon to attack,
-  lantern to dodge and close in. Other helpers' lights wait meanwhile.
+- In the dark, Auto Combat swaps weapon and lantern (or torch): weapon to
+  attack, light to dodge and close in. Other helpers' lights wait meanwhile.
+- Turning Auto Combat off at night leaves your light in your hands.
+- While ActionQueue works, Shift+click and Shift+drag still add trees,
+  rocks and the like that need a tool you aren't holding (a marbell in
+  hand included), and other helpers stop swapping your tool out between
+  queued targets.
+- Hounds are given more room after their bite, and werepigs are kited.
 - The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
 - Auto Dodge is on exactly while Auto Combat is on.
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.2.0"
+version = "0.2.1"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -106,18 +114,26 @@ configuration_options = {
         "In caves and at night, walking never swaps your only light (lantern, torch, miner hat) for another item", true),
     onoff("walk_only_faster", "Walk swaps only when faster",
         "Walking swaps your hands item only for one that makes you faster (a cane), so your weapon stays in hand", true),
-    onoff("prefer_axe", "Axe before pickaxe",
-        "When Auto Combat or Equipment Master picks a pickaxe to fight with, use your axe instead if it hits as hard", true),
+    onoff("prefer_axe", "Axe, pickaxe, shovel; spear before marbell",
+        "When Auto Combat or Equipment Master picks a tool or marbell to fight with, use your axe over a pickaxe or shovel, your pickaxe over a shovel, and a spear over a marbell", true),
     onoff("prefer_lantern", "Lantern before torch",
         "In the dark, when a helper equips a torch for light and you carry a lantern with fuel, the lantern is used instead", true),
     onoff("keep_tools", "Tools stay in hand between fights",
         "While Auto Combat has nothing to fight, a tool in your hands stays there. In a fight, Auto Combat uses your real weapon if it hits harder", true),
     onoff("queue_tools", "Shift+click switches tools",
-        "With Auto Combat on, the tool Auto Actions picks for a Shift+click is equipped before the click. After pickups, a queued tree or rock waits until you're idle instead of being dropped", true),
+        "With Auto Combat on, the tool Auto Actions picks for a Shift+click is equipped before the click. After pickups, a queued tree or rock waits until you're idle instead of being dropped. Targets that need a tool you carry but don't hold (a marbell in hand too) can still be queued", true),
+    onoff("queue_keep_tool", "Keep the queue's tool in hand",
+        "While ActionQueue works with a tool, Auto Actions and Equipment Master don't swap it for another item (a Lazy Explorer, bare hands) between queued targets", true),
     onoff("dragonfly_first", "Dragonfly first, larvae later",
         "While Dragonfly is within 15 of you, Auto Combat leaves lava larvae alone and keeps hitting her. Farther away it clears them as before", true),
     onoff("kite_lantern", "Lantern while kiting in the dark",
-        "In the dark, Auto Combat uses your lantern to dodge and close in, and your weapon to attack. Auto Actions' and Equipment Master's dark light wait while it attacks", true),
+        "In the dark, Auto Combat uses your lantern (or a torch if you have no lantern) to dodge and close in, and your weapon to attack. Auto Actions' and Equipment Master's dark light wait while it attacks", true),
+    onoff("keep_light_on_stop", "Keep your light when Auto Combat stops",
+        "In the dark, turning Auto Combat off leaves your lantern or torch in your hands instead of switching to your weapon", true),
+    onoff("hound_spacing", "More room after a hound bite",
+        "Hit-and-run starts dodging a hound's bite a little sooner, and both it and auto_dodger keep you out a few frames longer after the bite", true),
+    onoff("werepig_kiting", "Kite werepigs",
+        "Hit-and-run and auto_dodger treat a werepig's lunge like the Frankenpig's, so you dodge it instead of standing in it", true),
     onoff("spider_dens_last", "Spider dens last",
         "F takes nearby spiders before a den and only hits a den you started on with Ctrl+F. Auto Combat fights spiders first, then the den", true),
     onoff("web_slow", "Dodge knows webbing slows you",
