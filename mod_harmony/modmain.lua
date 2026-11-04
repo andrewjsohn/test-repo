@@ -520,11 +520,40 @@ local function LogSkip(item)
     end
 end
 
+-- Calls another mod's code from one of the wrappers below. An error in it
+-- used to be passed on, which crashed the game and lost where it really
+-- happened (the crash log then blamed the wrong mods). Now the error is
+-- printed once with its full trace and the call simply returns nothing for
+-- that frame: no attack target, no walking swap, no gear event.
+local CatchCall
+do
+    local seen, seen_n = {}, 0
+    local function Trace(err)
+        local msg = tostring(err)
+        local tb = G.debug ~= nil and type(G.debug.traceback) == "function" and G.debug.traceback(msg, 2) or msg
+        return { msg = msg, tb = tb }
+    end
+    CatchCall = function(what, fn, ...)
+        local n = G.select("#", ...)
+        local args = { ... }
+        local ok, a, b, c = G.xpcall(function() return fn(G.unpack(args, 1, n)) end, Trace)
+        if ok then return a, b, c end
+        local info = type(a) == "table" and a or { msg = tostring(a), tb = tostring(a) }
+        local key = what .. "|" .. info.msg
+        if not seen[key] and seen_n < 20 then
+            seen[key] = true
+            seen_n = seen_n + 1
+            print("[mod_harmony] caught an error in " .. what .. " (the game keeps running): " .. info.msg)
+            print(info.tb)
+        end
+        return nil
+    end
+end
+
 local function WithWalkSwap(fn, ...)
     walk_swap_depth = walk_swap_depth + 1
-    local ok, a, b, c = G.pcall(fn, ...)
+    local a, b, c = CatchCall("walking", fn, ...)
     walk_swap_depth = walk_swap_depth - 1
-    if not ok then G.error(a, 0) end
     return a, b, c
 end
 
@@ -541,9 +570,8 @@ end
 
 local function WithFightSwap(fn, ...)
     fight_swap_depth = fight_swap_depth + 1
-    local ok, a, b, c = G.pcall(fn, ...)
+    local a, b, c = CatchCall("fight gear or attack target", fn, ...)
     fight_swap_depth = fight_swap_depth - 1
-    if not ok then G.error(a, 0) end
     return a, b, c
 end
 
@@ -1688,6 +1716,30 @@ do
         return false
     end
 
+    local QUEUE_WORK_IDS = { CHOP = true, MINE = true, HACK = true, DIG = true, HAMMER = true }
+    local QUEUE_STUCK_WAIT = 2.5
+
+    local function PredictionOn(aq)
+        local pc = aq.inst ~= nil and aq.inst.components ~= nil and aq.inst.components.playercontroller or nil
+        return pc ~= nil and not pc.ismastersim and pc.locomotor ~= nil
+    end
+
+    -- ActionQueue's own test for "this action is over", plus a short name for
+    -- the state you're in, so standing still in it can be timed.
+    local function WaitDone(aq)
+        local inst = aq.inst
+        local sg = inst.sg
+        local pc = inst.components.playercontroller
+        local moving = (sg ~= nil and sg:HasStateTag("moving")) or inst:HasTag("moving")
+        local working = pc ~= nil and type(pc.IsDoingOrWorking) == "function" and pc:IsDoingOrWorking() or false
+        local done = not moving and inst:HasTag("idle") and not working
+        local name = sg ~= nil and sg.currentstate ~= nil and sg.currentstate.name or "?"
+        local x, _, z = inst.Transform:GetWorldPosition()
+        local state = name .. (inst:HasTag("idle") and " idle" or "") .. (working and " working" or "")
+            .. (moving and " moving" or "") .. string.format(" %.1f,%.1f", x, z)
+        return done, state
+    end
+
     local function StillBusy(aq, target)
         return target:IsValid() and aq.inst:IsValid() and not ReadyForWalkTo(aq.inst)
     end
@@ -1807,6 +1859,39 @@ do
                         tostring(target.prefab))
                 end
                 return act, rc
+            end
+        end
+        -- With Auto Combat off (movement prediction on), ActionQueue waits after
+        -- each chop until the game says you're idle and not working. Sometimes
+        -- that never comes: you stand still, but the queue waits forever. When
+        -- you've stood in the same state for a few seconds after a tool action,
+        -- the wait ends and the queue sends the next swing.
+        if type(aq.Wait) == "function" then
+            local old_wait = aq.Wait
+            aq.Wait = function(self, action, target, ...)
+                local id = type(action) == "table" and action.id or nil
+                if not CFG.queue_tools or (action ~= nil and not QUEUE_WORK_IDS[id])
+                    or not SafeCall("queue wait", InActionThread, self)
+                    or not SafeCall("queue wait", PredictionOn, self) then
+                    return old_wait(self, action, target, ...)
+                end
+                -- outside pcall: this runs in ActionQueue's thread and pauses
+                local start = G.GetTime()
+                G.Sleep(type(self.work_delay) == "number" and self.work_delay or G.FRAMES)
+                local last_state, still_since = nil, G.GetTime()
+                while true do
+                    G.Sleep(type(self.action_delay) == "number" and self.action_delay or G.FRAMES)
+                    local done, state = SafeCall("queue wait", WaitDone, self)
+                    if done or not self.inst:IsValid() then break end
+                    local now = G.GetTime()
+                    if state ~= last_state then
+                        last_state, still_since = state, now
+                    elseif now - still_since >= QUEUE_STUCK_WAIT then
+                        Log("queue: stood still " .. string.format("%.1f", now - start) .. "s after", tostring(id),
+                            "in", tostring(state), "- sending the next one")
+                        break
+                    end
+                end
             end
         end
         Log("patched ActionQueue clicks (tools equip with Auto Combat on, wrong-tool targets wait for idle or get their tool)")

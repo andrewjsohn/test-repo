@@ -40,13 +40,17 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Hounds are given more room after their bite, and werepigs are kited.
 - The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
 - Auto Dodge is on exactly while Auto Combat is on.
+- A helper mod's error while picking an attack target or walking no longer
+  crashes the game; it is written to the log with where it happened.
+- With Auto Combat off, a Shift+click chop queue no longer stalls when
+  you stand still between swings.
 - Other mods' Chinese text that was translated before shows in English,
   even after a Steam update puts the Chinese back (new text stays as is).
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.2.2"
+version = "0.2.3"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
