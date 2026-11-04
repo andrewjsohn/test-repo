@@ -40,11 +40,13 @@ ActionQueue RB3 and Auto Explore play nicely together.
 - Hounds are given more room after their bite, and werepigs are kited.
 - The arrow keys only zoom the camera; hit-and-run's arrow keys are off.
 - Auto Dodge is on exactly while Auto Combat is on.
+- Other mods' Chinese text that was translated before shows in English,
+  even after a Steam update puts the Chinese back (new text stays as is).
 
 Client only. Every fix has its own switch below.
 ]]
 author = "Claude for Andrew"
-version = "0.2.1"
+version = "0.2.2"
 api_version = 10
 dst_compatible = true
 client_only_mod = true
@@ -167,5 +169,7 @@ configuration_options = {
         },
         default = 12,
     },
+    onoff("translate_mods", "English for other mods",
+        "Shows other mods' translated text in English even after a Steam update brings the Chinese back. New text from an update stays as it is", true),
     onoff("debug_log", "Debug log", "Print what the helper does to client_log.txt", false),
 }

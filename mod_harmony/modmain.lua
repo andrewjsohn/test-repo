@@ -7,6 +7,10 @@
 
 local G = GLOBAL
 
+-- English for other mods' text (mh_translate.lua). Runs on its own, so a
+-- problem there never stops the fixes below.
+if GetModConfigData("translate_mods") ~= false then G.pcall(modimport, "mh_translate.lua") end
+
 -- A mod's environment only carries a few Lua basics (tonumber is not one of
 -- them), so take every builtin used below from the real global table.
 local tonumber, tostring, type, ipairs, pairs, print, math, string, table =
